@@ -1,0 +1,382 @@
+package toolstore
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"strconv"
+)
+
+// InvokeLocalFunc dispatches a kind=local tool by registry name with the
+// JSON-encoded input body. Returns the tool's string output.
+type InvokeLocalFunc func(ctx context.Context, name, input string) (string, error)
+
+// LocalDescriptor describes one in-process registered local tool — what's
+// available to be enabled via POST /tools.
+type LocalDescriptor struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+}
+
+// ListLocalsFunc returns the in-process registered local tools — used for
+// discovery on GET /locals.
+type ListLocalsFunc func() []LocalDescriptor
+
+// HandlerOptions wires optional callbacks into RegisterHandlers. Any nil field
+// disables the corresponding endpoint(s) — the lib never assumes a specific
+// runtime is in-process.
+type HandlerOptions struct {
+	InvokeLocal       InvokeLocalFunc       // POST /tools/by-name/{name}/invoke (kind=local)
+	ListLocals        ListLocalsFunc        // GET  /locals
+	ResolveCredential ResolveCredentialFunc // POST /provision (env-key resolution)
+}
+
+// RegisterHandlers wires the HTTP API onto mux.
+func RegisterHandlers(mux *http.ServeMux, s *Store, opts HandlerOptions) {
+	h := &handler{s: s, opts: opts}
+
+	mux.HandleFunc("GET /health", h.health)
+
+	mux.HandleFunc("GET /tools", h.listTools)
+	mux.HandleFunc("POST /tools", h.upsertTool)
+	mux.HandleFunc("GET /tools/{id}", h.getTool)
+	mux.HandleFunc("DELETE /tools/{id}", h.deleteTool)
+	mux.HandleFunc("POST /tools/{id}/enable", h.enableTool)
+	mux.HandleFunc("POST /tools/{id}/disable", h.disableTool)
+
+	mux.HandleFunc("GET /tools/by-name/{name}", h.getToolByName)
+	mux.HandleFunc("GET /tools/by-name/{name}/spec", h.specByName)
+	mux.HandleFunc("POST /tools/by-name/{name}/invoke", h.invokeByName)
+
+	mux.HandleFunc("GET /locals", h.listLocals)
+	mux.HandleFunc("POST /provision", h.provision)
+
+	mux.HandleFunc("GET /instances/{id}/tools", h.listInstanceTools)
+	mux.HandleFunc("POST /instances/{id}/tools/by-name/{name}", h.enableForInstance)
+	mux.HandleFunc("DELETE /instances/{id}/tools/by-name/{name}", h.disableForInstance)
+	mux.HandleFunc("GET /tools/by-name/{name}/instances", h.listInstancesForTool)
+}
+
+type handler struct {
+	s    *Store
+	opts HandlerOptions
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeErr(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func (h *handler) health(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+func (h *handler) listTools(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	f := ListFilter{
+		Kind:        Kind(q.Get("kind")),
+		Tag:         q.Get("tag"),
+		Query:       q.Get("q"),
+		EnabledOnly: q.Get("enabled") == "true",
+	}
+	if f.Kind != "" && !f.Kind.Valid() {
+		writeErr(w, 400, "invalid kind: "+string(f.Kind))
+		return
+	}
+	if lim := q.Get("limit"); lim != "" {
+		n, err := strconv.Atoi(lim)
+		if err != nil {
+			writeErr(w, 400, "invalid limit")
+			return
+		}
+		f.Limit = n
+	}
+	tools, err := h.s.ListTools(f)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if tools == nil {
+		tools = []Tool{}
+	}
+	writeJSON(w, 200, tools)
+}
+
+func (h *handler) upsertTool(w http.ResponseWriter, r *http.Request) {
+	var t Tool
+	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+		writeErr(w, 400, "invalid json: "+err.Error())
+		return
+	}
+	inserted, err := h.s.UpsertTool(&t)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	status := 200
+	if inserted {
+		status = 201
+	}
+	writeJSON(w, status, t)
+}
+
+func (h *handler) getTool(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	t, err := h.s.GetTool(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, 404, "tool not found")
+			return
+		}
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, t)
+}
+
+func (h *handler) getToolByName(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		writeErr(w, 400, "name required")
+		return
+	}
+	t, err := h.s.GetToolByName(name)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, 404, "tool not found")
+			return
+		}
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, t)
+}
+
+func (h *handler) deleteTool(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if err := h.s.DeleteTool(id); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, 404, "tool not found")
+			return
+		}
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "deleted"})
+}
+
+func (h *handler) enableTool(w http.ResponseWriter, r *http.Request) {
+	h.setEnabled(w, r, true)
+}
+
+func (h *handler) disableTool(w http.ResponseWriter, r *http.Request) {
+	h.setEnabled(w, r, false)
+}
+
+func (h *handler) setEnabled(w http.ResponseWriter, r *http.Request, v bool) {
+	id, err := parseID(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if err := h.s.SetEnabled(id, v); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, 404, "tool not found")
+			return
+		}
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"id": id, "enabled": v})
+}
+
+func (h *handler) invokeByName(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		writeErr(w, 400, "name required")
+		return
+	}
+	t, err := h.s.GetToolByName(name)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, 404, "tool not found")
+			return
+		}
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if !t.Enabled {
+		writeErr(w, 409, "tool is disabled")
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, 400, "read body: "+err.Error())
+		return
+	}
+	switch t.Kind {
+	case KindLocal:
+		if h.opts.InvokeLocal == nil {
+			writeErr(w, 501, "this server does not host local tool implementations")
+			return
+		}
+		out, err := h.opts.InvokeLocal(r.Context(), name, string(body))
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]string{"output": out})
+	case KindCLI:
+		out, err := runCLI(r.Context(), t, string(body))
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]string{"output": out})
+	case KindMCP:
+		writeErr(w, 400, "mcp tools are not invokable via /invoke; use /provision to obtain a launcher config")
+	default:
+		writeErr(w, 500, "unknown kind: "+string(t.Kind))
+	}
+}
+
+func (h *handler) specByName(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		writeErr(w, 400, "name required")
+		return
+	}
+	t, err := h.s.GetToolByName(name)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, 404, "tool not found")
+			return
+		}
+		writeErr(w, 500, err.Error())
+		return
+	}
+	switch t.Kind {
+	case KindCLI:
+		writeJSON(w, 200, t.CLI)
+	case KindMCP:
+		writeJSON(w, 200, t.MCP)
+	case KindLocal:
+		writeErr(w, 400, "spec is only meaningful for kind=cli or kind=mcp; locals are invoked via /invoke")
+	default:
+		writeErr(w, 500, "unknown kind: "+string(t.Kind))
+	}
+}
+
+func (h *handler) provision(w http.ResponseWriter, r *http.Request) {
+	var req ProvisionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "invalid json: "+err.Error())
+		return
+	}
+	resp, err := Provision(r.Context(), h.s, req, h.opts.ResolveCredential)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, resp)
+}
+
+func (h *handler) listInstanceTools(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeErr(w, 400, "instance id required")
+		return
+	}
+	tools, err := h.s.ListInstanceTools(id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if tools == nil {
+		tools = []Tool{}
+	}
+	writeJSON(w, 200, tools)
+}
+
+func (h *handler) enableForInstance(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	name := r.PathValue("name")
+	err := h.s.EnableForInstance(id, name)
+	switch {
+	case err == nil:
+		writeJSON(w, 200, map[string]string{"instance_id": id, "tool": name, "status": "enabled"})
+	case errors.Is(err, ErrNotFound):
+		writeErr(w, 404, "tool not found")
+	case errors.Is(err, ErrGloballyDisabled):
+		writeErr(w, 409, err.Error())
+	default:
+		writeErr(w, 400, err.Error())
+	}
+}
+
+func (h *handler) disableForInstance(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	name := r.PathValue("name")
+	err := h.s.DisableForInstance(id, name)
+	switch {
+	case err == nil:
+		writeJSON(w, 200, map[string]string{"instance_id": id, "tool": name, "status": "disabled"})
+	case errors.Is(err, ErrNotFound):
+		writeErr(w, 404, "no opt-in for that (instance, tool)")
+	default:
+		writeErr(w, 400, err.Error())
+	}
+}
+
+func (h *handler) listInstancesForTool(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	ids, err := h.s.ListInstancesForTool(name)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, 404, "tool not found")
+			return
+		}
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	writeJSON(w, 200, ids)
+}
+
+func (h *handler) listLocals(w http.ResponseWriter, _ *http.Request) {
+	if h.opts.ListLocals == nil {
+		writeJSON(w, 200, []LocalDescriptor{})
+		return
+	}
+	out := h.opts.ListLocals()
+	if out == nil {
+		out = []LocalDescriptor{}
+	}
+	writeJSON(w, 200, out)
+}
+
+func parseID(s string) (int64, error) {
+	id, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, errors.New("invalid id")
+	}
+	return id, nil
+}

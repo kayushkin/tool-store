@@ -1,0 +1,310 @@
+package tools
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	
+	"github.com/kayushkin/tool-store/schema"
+)
+
+// ReadFile returns a tool that reads file contents.
+// Supports reading multiple files at once via the "paths" parameter.
+func ReadFile() Impl {
+	type input struct {
+		Path   string   `json:"path"`
+		Paths  []string `json:"paths"`
+		Offset int      `json:"offset"`
+		Limit  int      `json:"limit"`
+	}
+	return Impl{
+		Name:        "read_files",
+		Description: "Read file contents. Use 'path' for a single file, or 'paths' (array) to read multiple files at once — prefer batching reads to save turns. For large files, use offset (1-indexed line) and limit (max lines).",
+		InputSchema: schema.Props([]string{}, map[string]any{
+			"path":   schema.Str("Path to a single file"),
+			"paths":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Multiple file paths to read at once (preferred for batching)"},
+			"offset": schema.Integer("Line number to start from (1-indexed, optional, single file only)"),
+			"limit":  schema.Integer("Maximum number of lines to return (optional, single file only)"),
+		}),
+		Run: func(ctx context.Context, raw string) (string, error) {
+			in, err := schema.Parse[input](raw)
+			if err != nil {
+				return "", err
+			}
+
+			// Collect all paths to read.
+			paths := in.Paths
+			if in.Path != "" {
+				if len(paths) == 0 {
+					paths = []string{in.Path}
+				} else {
+					// Both specified — prepend single path.
+					paths = append([]string{in.Path}, paths...)
+				}
+			}
+			if len(paths) == 0 {
+				return "error: provide 'path' or 'paths'", nil
+			}
+
+			// Single file with offset/limit support.
+			if len(paths) == 1 {
+				return readSingleFile(paths[0], in.Offset, in.Limit), nil
+			}
+
+			// Multiple files — batch read.
+			var results []string
+			for _, p := range paths {
+				content := readSingleFile(p, 0, 0)
+				results = append(results, fmt.Sprintf("=== %s ===\n%s", p, content))
+			}
+			return strings.Join(results, "\n\n"), nil
+		},
+	}
+}
+
+// readSingleFile reads one file with optional offset/limit.
+// Appends metadata about completeness to prevent unnecessary re-reads.
+func readSingleFile(path string, offset, limit int) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("error: %s", err)
+	}
+
+	allLines := strings.Split(string(data), "\n")
+	totalLines := len(allLines)
+
+	// Manual offset/limit pagination.
+	if offset > 0 || limit > 0 {
+		start := 0
+		if offset > 0 {
+			start = offset - 1
+		}
+		if start > totalLines {
+			return fmt.Sprintf("offset %d beyond file length (%d lines)", offset, totalLines)
+		}
+		end := totalLines
+		if limit > 0 && start+limit < end {
+			end = start + limit
+		}
+		content := strings.Join(allLines[start:end], "\n")
+
+		// Tell the model what range it got and what remains.
+		if end < totalLines {
+			content += fmt.Sprintf("\n\n[showing lines %d-%d of %d. Use offset=%d to continue]", start+1, end, totalLines, end+1)
+		} else {
+			content += fmt.Sprintf("\n\n[showing lines %d-%d of %d — end of file]", start+1, end, totalLines)
+		}
+		return content
+	}
+
+	// Full file read — apply auto-truncation for very large files.
+	content := string(data)
+	const maxBytes = 100_000
+	if len(content) > maxBytes {
+		content = content[:maxBytes] + "\n... (truncated)"
+	}
+	content = schema.TruncateFileRead(content, false)
+
+	// Check if truncation happened.
+	resultLines := strings.Count(content, "\n") + 1
+	if resultLines < totalLines {
+		// File was truncated. Show what range was returned and how to get more.
+		content += fmt.Sprintf("\n\n[showing first ~%d of %d lines — file truncated. Use offset/limit to read specific sections]", resultLines, totalLines)
+	} else {
+		// Complete file — explicitly say so to prevent re-reads.
+		content += fmt.Sprintf("\n\n[complete file — %d lines]", totalLines)
+	}
+
+	return content
+}
+
+// WriteFile returns a tool that creates or overwrites files.
+func WriteFile() Impl {
+	type fileEntry struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	type input struct {
+		Path    string      `json:"path"`
+		Content string      `json:"content"`
+		Files   []fileEntry `json:"files"`
+	}
+	return Impl{
+		Name:        "write_files",
+		Description: "Create or overwrite files. Use files[] to write multiple at once. Always pair writes with a build/test — writes are deterministic, don't waste a turn on just writes.",
+		InputSchema: schema.Props([]string{}, map[string]any{
+			"path":    schema.Str("Path to a single file to write"),
+			"content": schema.Str("Content for the single file"),
+			"files":   map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{"path": schema.Str("File path"), "content": schema.Str("File content")}, "required": []string{"path", "content"}}, "description": "Multiple files to write at once (preferred for batching)"},
+		}),
+		Run: func(ctx context.Context, raw string) (string, error) {
+			in, err := schema.Parse[input](raw)
+			if err != nil {
+				return "", err
+			}
+
+			// Collect all files to write.
+			files := in.Files
+			if in.Path != "" {
+				files = append([]fileEntry{{Path: in.Path, Content: in.Content}}, files...)
+			}
+			if len(files) == 0 {
+				return "error: provide 'path'+'content' or 'files'", nil
+			}
+
+			var results []string
+			for _, f := range files {
+				if err := os.MkdirAll(filepath.Dir(f.Path), 0755); err != nil {
+					results = append(results, fmt.Sprintf("error creating directory for %s: %s", f.Path, err))
+					continue
+				}
+				if err := os.WriteFile(f.Path, []byte(f.Content), 0644); err != nil {
+					results = append(results, fmt.Sprintf("error writing %s: %s", f.Path, err))
+					continue
+				}
+				results = append(results, fmt.Sprintf("wrote %d bytes to %s", len(f.Content), f.Path))
+			}
+			return strings.Join(results, "\n"), nil
+		},
+	}
+}
+
+// EditFile returns a tool that does exact string replacement in files.
+func EditFile() Impl {
+	type editEntry struct {
+		Path    string `json:"path"`
+		OldText string `json:"old_text"`
+		NewText string `json:"new_text"`
+	}
+	type input struct {
+		Path    string      `json:"path"`
+		OldText string      `json:"old_text"`
+		NewText string      `json:"new_text"`
+		Edits   []editEntry `json:"edits"`
+	}
+	return Impl{
+		Name:        "edit_files",
+		Description: "Make exact text replacements. Use edits[] for multiple files at once. Always pair with verification (build, grep, read) — edits are deterministic.",
+		InputSchema: schema.Props([]string{}, map[string]any{
+			"path":     schema.Str("Path to a single file to edit"),
+			"old_text": schema.Str("Exact text to find and replace"),
+			"new_text": schema.Str("New text to replace the old text with"),
+			"edits":    map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{"path": schema.Str("File path"), "old_text": schema.Str("Text to find"), "new_text": schema.Str("Replacement text")}, "required": []string{"path", "old_text", "new_text"}}, "description": "Multiple edits to apply at once (preferred for batching)"},
+		}),
+		Run: func(ctx context.Context, raw string) (string, error) {
+			in, err := schema.Parse[input](raw)
+			if err != nil {
+				return "", err
+			}
+
+			// Collect all edits.
+			edits := in.Edits
+			if in.Path != "" {
+				edits = append([]editEntry{{Path: in.Path, OldText: in.OldText, NewText: in.NewText}}, edits...)
+			}
+			if len(edits) == 0 {
+				return "error: provide 'path'+'old_text'+'new_text' or 'edits'", nil
+			}
+
+			var results []string
+			for _, e := range edits {
+				data, err := os.ReadFile(e.Path)
+				if err != nil {
+					results = append(results, fmt.Sprintf("error: %s", err))
+					continue
+				}
+				content := string(data)
+
+				count := strings.Count(content, e.OldText)
+				if count == 0 {
+					results = append(results, fmt.Sprintf("error: old_text not found in %s", e.Path))
+					continue
+				}
+				if count > 1 {
+					results = append(results, fmt.Sprintf("error: old_text matches %d times in %s — must be unique", count, e.Path))
+					continue
+				}
+
+				newContent := strings.Replace(content, e.OldText, e.NewText, 1)
+				if err := os.WriteFile(e.Path, []byte(newContent), 0644); err != nil {
+					results = append(results, fmt.Sprintf("error writing %s: %s", e.Path, err))
+					continue
+				}
+				results = append(results, fmt.Sprintf("edited %s", e.Path))
+			}
+			return strings.Join(results, "\n"), nil
+		},
+	}
+}
+
+// ListFiles returns a tool that lists directory contents.
+func ListFiles() Impl {
+	type input struct {
+		Path      string `json:"path"`
+		Recursive bool   `json:"recursive"`
+	}
+	return Impl{
+		Name:        "list_files",
+		Description: "List files and directories at a path. Use recursive=true for a tree listing (respects .gitignore patterns).",
+		InputSchema: schema.Props([]string{"path"}, map[string]any{
+			"path":      schema.Str("Directory path to list"),
+			"recursive": schema.Bool("List recursively (default: false)"),
+		}),
+		Run: func(ctx context.Context, raw string) (string, error) {
+			in, err := schema.Parse[input](raw)
+			if err != nil {
+				return "", err
+			}
+			if in.Path == "" {
+				in.Path = "."
+			}
+
+			if !in.Recursive {
+				entries, err := os.ReadDir(in.Path)
+				if err != nil {
+					return fmt.Sprintf("error: %s", err), nil
+				}
+				var lines []string
+				for _, e := range entries {
+					name := e.Name()
+					if e.IsDir() {
+						name += "/"
+					}
+					lines = append(lines, name)
+				}
+				return schema.TruncateList(lines, 50), nil
+			}
+
+			var lines []string
+			const maxEntries = 1000
+			filepath.WalkDir(in.Path, func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return nil
+				}
+				if len(lines) >= maxEntries {
+					return filepath.SkipAll
+				}
+				name := d.Name()
+				if d.IsDir() && strings.HasPrefix(name, ".") && path != in.Path {
+					return filepath.SkipDir
+				}
+				rel, _ := filepath.Rel(in.Path, path)
+				if rel == "." {
+					return nil
+				}
+				if d.IsDir() {
+					rel += "/"
+				}
+				lines = append(lines, rel)
+				return nil
+			})
+			if len(lines) >= maxEntries {
+				lines = append(lines, fmt.Sprintf("... (truncated at %d entries)", maxEntries))
+			}
+			return schema.TruncateList(lines, 50), nil
+		},
+	}
+}

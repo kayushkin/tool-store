@@ -1,0 +1,17 @@
+[Unit]
+Description=Tool Store — registry of MCP / CLI / local tools for harnesses
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/kayushkincom/bin/tool-store
+Environment=TOOL_STORE_ADDR=:8302
+Environment=AUTH_STORE_URL=http://127.0.0.1:8303
+Environment=AUTH_STORE_TOKEN=changeme
+Environment=HOME=/home/kayushkincom
+WorkingDirectory=/home/kayushkincom/repos/tool-store
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
