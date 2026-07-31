@@ -63,22 +63,61 @@ func TruncateShellOutput(output string) string {
 	return TruncateLines(output, 20, 10)
 }
 
-// TruncateFileRead truncates file read output for very large files.
+// Line windows used when a whole-file read is too long to return intact.
+const (
+	fileReadWholeFileLimit = 2000
+	fileReadKeepFirst      = 500
+	fileReadKeepLast       = 50
+)
+
+// FileLines splits file content into the lines a reader can actually address.
+// A file that ends in a newline has that many lines, not one more:
+// strings.Split leaves an empty final element that nobody can read, edit, or
+// ask for by number, and counting it makes every line number reported back to
+// the model one too many. Empty content is zero lines.
+func FileLines(content string) []string {
+	if content == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(content, "\n"), "\n")
+}
+
+// FileReadCut records what TruncateFileRead left out. The caller needs this
+// reported rather than re-derived: a line count taken over the returned text
+// also counts the truncation banner, and it cannot see a cut that some other
+// limit made before this one ran.
+type FileReadCut struct {
+	TotalLines int // lines in the content handed to TruncateFileRead
+	KeptFirst  int // lines kept from the start
+	KeptLast   int // lines kept from the end
+}
+
+// Truncated reports whether any line was left out.
+func (c FileReadCut) Truncated() bool { return c.KeptFirst+c.KeptLast < c.TotalLines }
+
+// TruncateFileRead truncates file read output for very large files, and
+// reports what it removed.
+//
 // Files under 2000 lines are returned in full — truncating source files
 // causes repeated re-reads that waste API turns (far more expensive than
 // the extra context tokens). Truncation is for large error logs, content
 // dumps, and generated files — not normal source code.
 // Files over 2000 lines get truncated (first 500 + last 50).
-func TruncateFileRead(content string, truncated bool) string {
-	if truncated {
-		// Already truncated by offset/limit, return as-is
-		return content
+func TruncateFileRead(content string) (string, FileReadCut) {
+	total := len(FileLines(content))
+	if total <= fileReadWholeFileLimit {
+		return content, FileReadCut{TotalLines: total, KeptFirst: total}
 	}
-	lines := strings.Split(content, "\n")
-	if len(lines) <= 2000 {
-		return content
+	// Hand TruncateLines the content without its trailing newline, so the
+	// window it keeps is fileReadKeepLast real lines rather than the last
+	// fileReadKeepLast-1 plus an empty one — otherwise the range this
+	// function reports and the range the caller gets disagree by a line.
+	kept := TruncateLines(strings.TrimSuffix(content, "\n"), fileReadKeepFirst, fileReadKeepLast)
+	return kept, FileReadCut{
+		TotalLines: total,
+		KeptFirst:  fileReadKeepFirst,
+		KeptLast:   fileReadKeepLast,
 	}
-	return TruncateLines(content, 500, 50)
 }
 
 // SummarizeFileWrite creates a brief summary for file write operations.

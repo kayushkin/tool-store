@@ -65,24 +65,39 @@ func ReadFile() Impl {
 	}
 }
 
+// maxWholeFileReadBytes caps a read that asked for no particular range. It is
+// a second, independent limit from the line window in schema.TruncateFileRead:
+// a file can be short enough to return whole and still be enormous, if its
+// lines are.
+const maxWholeFileReadBytes = 100_000
+
 // readSingleFile reads one file with optional offset/limit.
-// Appends metadata about completeness to prevent unnecessary re-reads.
+//
+// The footer it appends is a claim the rest of the system acts on — inber's
+// read cache parses "[complete file — N lines]" and then serves a stub for
+// every later read of that path, including the offset/limit read the
+// truncation notice tells the model to make. So the footer states what this
+// function actually returned, reported by the code that did each cut. It must
+// never be re-derived by counting lines in the output: that count also counts
+// the truncation banner, and it cannot see a cut made earlier in this
+// function.
 func readSingleFile(path string, offset, limit int) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Sprintf("error: %s", err)
 	}
 
-	allLines := strings.Split(string(data), "\n")
+	allLines := schema.FileLines(string(data))
 	totalLines := len(allLines)
 
-	// Manual offset/limit pagination.
+	// Manual offset/limit pagination — the caller named a range and knows it
+	// is getting part of the file.
 	if offset > 0 || limit > 0 {
 		start := 0
 		if offset > 0 {
 			start = offset - 1
 		}
-		if start > totalLines {
+		if start >= totalLines {
 			return fmt.Sprintf("offset %d beyond file length (%d lines)", offset, totalLines)
 		}
 		end := totalLines
@@ -100,20 +115,27 @@ func readSingleFile(path string, offset, limit int) string {
 		return content
 	}
 
-	// Full file read — apply auto-truncation for very large files.
+	// Whole-file read. Two limits can cut it short and the caller asked for
+	// neither, so track each one rather than inferring afterwards.
 	content := string(data)
-	const maxBytes = 100_000
-	if len(content) > maxBytes {
-		content = content[:maxBytes] + "\n... (truncated)"
+	droppedBytes := 0
+	if len(content) > maxWholeFileReadBytes {
+		droppedBytes = len(content) - maxWholeFileReadBytes
+		content = content[:maxWholeFileReadBytes] + "\n... (truncated)"
 	}
-	content = schema.TruncateFileRead(content, false)
+	content, cut := schema.TruncateFileRead(content)
 
-	// Check if truncation happened.
-	resultLines := strings.Count(content, "\n") + 1
-	if resultLines < totalLines {
-		// File was truncated. Show what range was returned and how to get more.
-		content += fmt.Sprintf("\n\n[showing first ~%d of %d lines — file truncated. Use offset/limit to read specific sections]", resultLines, totalLines)
-	} else {
+	switch {
+	case droppedBytes > 0:
+		// The byte cap fired, so the result stops mid-file and, if the line
+		// window fired too, has a hole in it as well. Neither end of it can
+		// honestly be given as a line range, so report bytes.
+		content += fmt.Sprintf("\n\n[partial read — %d of %d bytes of a %d-line file. Use offset/limit to read specific sections]",
+			maxWholeFileReadBytes, len(data), totalLines)
+	case cut.Truncated():
+		content += fmt.Sprintf("\n\n[partial read — lines 1-%d and %d-%d of %d. Use offset/limit to read the lines between]",
+			cut.KeptFirst, totalLines-cut.KeptLast+1, totalLines, totalLines)
+	default:
 		// Complete file — explicitly say so to prevent re-reads.
 		content += fmt.Sprintf("\n\n[complete file — %d lines]", totalLines)
 	}
