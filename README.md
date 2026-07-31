@@ -245,6 +245,16 @@ POST /sessions
 
 llm-bridge-server's `injectMCPConfig` step calls `POST :8302/provision`, writes the response to a tmpfile, replaces the field with `mcp_config: <path>`, and the claudecode harness picks the path up via its existing `--mcp-config` flag. No msg-type changes required — the contract rides through the opaque `HarnessConfig` blob. Setting both `tool_store_tools` and `mcp_config` is rejected (single source of truth).
 
+A session that names no tools of its own gets whatever its **instance** has been opted into — the rows the Tools page writes through `POST /instances/{id}/tools/by-name/{name}`. llm-bridge-server asks for those by instance instead of by name:
+
+```jsonc
+POST /provision
+{ "instance_id": "inst-cc-local" }
+// → {"mcpServers": { … the instance's opted-in MCP tools … }}
+```
+
+Exactly one of `tools` and `instance_id` is required; a request carrying both is rejected, because merging a standing preference with a per-call list gives the same field two sources of truth. The two differ in how they treat a tool that is not an MCP server: `tools` names it outright, so a CLI or in-process local there is an error, while an instance's opt-in list legitimately spans every kind of tool, so the MCP subset is selected out of it. An instance nobody has ticked anything for provisions nothing and says so with `200 {}`, which is how a caller tells "no opt-ins" apart from "the lookup broke".
+
 ## Design principles
 
 - **Disabled by default.** The registry seeds itself with every in-process tool, but every new row starts disabled. Enabling is the deliberate act — no tool is silently active.

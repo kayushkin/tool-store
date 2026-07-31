@@ -6,10 +6,18 @@ import (
 	"fmt"
 )
 
-// ProvisionRequest names tools to provision. Empty Tools is an error — the
-// caller must list what they want, no implicit "all".
+// ProvisionRequest says which tools to provision, in one of two ways.
+//
+// Either name them outright in Tools, or name an instance in InstanceID and
+// let the store read that instance's opt-in list (the rows the Tools page
+// writes through /instances/{id}/tools/by-name/{name}). Exactly one of the
+// two must be set: an empty request is an error — the caller must say what it
+// wants, no implicit "all" — and a request carrying both is an error too,
+// because merging a standing preference with a per-call list gives the same
+// field two sources of truth.
 type ProvisionRequest struct {
-	Tools []string `json:"tools"`
+	Tools      []string `json:"tools"`
+	InstanceID string   `json:"instance_id"`
 }
 
 // ProvisionResponse mirrors the shape Claude Code expects in --mcp-config:
@@ -42,11 +50,12 @@ type ResolveCredentialFunc func(ctx context.Context, provider string) (string, e
 // out (no fallback) if any tool is missing, disabled, or has env-key
 // resolution gaps.
 func Provision(ctx context.Context, s *Store, req ProvisionRequest, resolve ResolveCredentialFunc) (*ProvisionResponse, error) {
-	if len(req.Tools) == 0 {
-		return nil, errors.New("provision: at least one tool name is required")
+	names, err := resolveRequestedToolNames(s, req)
+	if err != nil {
+		return nil, err
 	}
 	out := &ProvisionResponse{MCPServers: map[string]MCPServerConfig{}}
-	for _, name := range req.Tools {
+	for _, name := range names {
 		t, err := s.GetToolByName(name)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
@@ -83,6 +92,40 @@ func Provision(ctx context.Context, s *Store, req ProvisionRequest, resolve Reso
 		out.MCPServers[name] = cfg
 	}
 	return out, nil
+}
+
+// resolveRequestedToolNames turns a ProvisionRequest into the list of tool
+// names to build config for, rejecting a request that names neither source or
+// both.
+//
+// The two paths deliberately treat a non-MCP tool differently. A caller that
+// names tools outright gets an error from Provision if one of them is a CLI or
+// an in-process local, because it asked for something this endpoint cannot
+// hand back. An instance's opt-in list is not a provisioning request — it is a
+// standing preference that spans every kind of tool the instance may use — so
+// the MCP subset is selected out of it and the rest left alone. Erroring there
+// would mean one ticked CLI tool wedges MCP provisioning for that instance.
+func resolveRequestedToolNames(s *Store, req ProvisionRequest) ([]string, error) {
+	switch {
+	case len(req.Tools) > 0 && req.InstanceID != "":
+		return nil, errors.New("provision: request has both tools and instance_id; pick one")
+	case len(req.Tools) > 0:
+		return req.Tools, nil
+	case req.InstanceID != "":
+		tools, err := s.ListInstanceTools(req.InstanceID)
+		if err != nil {
+			return nil, fmt.Errorf("provision: list tools for instance %q: %w", req.InstanceID, err)
+		}
+		var names []string
+		for _, t := range tools {
+			if t.Kind == KindMCP {
+				names = append(names, t.Name)
+			}
+		}
+		return names, nil
+	default:
+		return nil, errors.New("provision: at least one tool name or an instance_id is required")
+	}
 }
 
 // resolveEnv walks a tool's EnvKeys and returns the map to embed in the MCP

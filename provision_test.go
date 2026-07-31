@@ -148,3 +148,114 @@ func TestProvisionEmptyToolsRejected(t *testing.T) {
 		t.Fatal("expected error for empty tools list")
 	}
 }
+
+// --- provisioning by instance -------------------------------------------
+//
+// These pin the second half of the wire: the rows the Tools page writes to
+// instance_tools now reach a provisioned session.
+
+// seedInstanceOptIns writes one MCP tool, one CLI tool and one globally
+// disabled MCP tool, and opts the given instance into the first two.
+func seedInstanceOptIns(t *testing.T, s *Store, instanceID string) {
+	t.Helper()
+	if _, err := s.UpsertTool(&Tool{
+		Name:    "remote-mcp",
+		Kind:    KindMCP,
+		MCP:     &MCPSpec{Transport: "http", URL: "https://mcp.example.com"},
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("upsert mcp: %v", err)
+	}
+	if _, err := s.UpsertTool(&Tool{
+		Name:    "ripgrep",
+		Kind:    KindCLI,
+		CLI:     &CLISpec{Command: "rg"},
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("upsert cli: %v", err)
+	}
+	for _, name := range []string{"remote-mcp", "ripgrep"} {
+		if err := s.EnableForInstance(instanceID, name); err != nil {
+			t.Fatalf("opt %s in: %v", name, err)
+		}
+	}
+}
+
+func TestProvisionByInstanceReadsTheOptInList(t *testing.T) {
+	s := openProvTest(t)
+	seedInstanceOptIns(t, s, "inst-1")
+
+	resp, err := Provision(context.Background(), s, ProvisionRequest{InstanceID: "inst-1"}, nil)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if _, ok := resp.MCPServers["remote-mcp"]; !ok {
+		t.Fatalf("instance opt-in did not reach the config: %+v", resp.MCPServers)
+	}
+	// The CLI tool is opted in for this instance and is not an MCP server;
+	// selecting the MCP subset is what keeps it from wedging the whole call.
+	if _, ok := resp.MCPServers["ripgrep"]; ok {
+		t.Fatal("a CLI tool must not appear under mcpServers")
+	}
+	if len(resp.MCPServers) != 1 {
+		t.Fatalf("want exactly the one MCP tool, got %+v", resp.MCPServers)
+	}
+}
+
+func TestProvisionByInstanceIgnoresAToolTheOwnerDisabledGlobally(t *testing.T) {
+	s := openProvTest(t)
+	seedInstanceOptIns(t, s, "inst-1")
+	tool, err := s.GetToolByName("remote-mcp")
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if err := s.SetEnabled(tool.ID, false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+
+	resp, err := Provision(context.Background(), s, ProvisionRequest{InstanceID: "inst-1"}, nil)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if len(resp.MCPServers) != 0 {
+		t.Fatalf("globally disabled tool leaked into the config: %+v", resp.MCPServers)
+	}
+}
+
+// An instance nobody has ticked anything for is the state of every instance on
+// this box today. It must provision nothing and say so without an error, so a
+// caller can tell "no opt-ins" apart from "the lookup broke".
+func TestProvisionByInstanceWithNoOptInsIsEmptyNotAnError(t *testing.T) {
+	s := openProvTest(t)
+	resp, err := Provision(context.Background(), s, ProvisionRequest{InstanceID: "inst-nobody-touched"}, nil)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if len(resp.MCPServers) != 0 {
+		t.Fatalf("want no servers, got %+v", resp.MCPServers)
+	}
+}
+
+func TestProvisionRejectsBothToolsAndInstance(t *testing.T) {
+	s := openProvTest(t)
+	seedInstanceOptIns(t, s, "inst-1")
+	_, err := Provision(context.Background(), s, ProvisionRequest{
+		Tools:      []string{"remote-mcp"},
+		InstanceID: "inst-1",
+	}, nil)
+	if err == nil {
+		t.Fatal("naming both a tool list and an instance must be an error, not a merge")
+	}
+}
+
+// The explicit-names path keeps its old contract: ask for a CLI tool by name
+// and you get an error, because you asked for something this endpoint cannot
+// return. Only the instance path selects a subset.
+func TestProvisionByNameStillRejectsANonMCPTool(t *testing.T) {
+	s := openProvTest(t)
+	seedInstanceOptIns(t, s, "inst-1")
+	_, err := Provision(context.Background(), s, ProvisionRequest{Tools: []string{"ripgrep"}}, nil)
+	if err == nil {
+		t.Fatal("naming a CLI tool outright must still be an error")
+	}
+}
