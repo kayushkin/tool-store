@@ -6,9 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"regexp"
 	"time"
+
+	"github.com/kayushkin/tool-store/internal/childprocess"
 )
 
 // runCLI executes a kind=cli tool. The CLISpec.ArgsTemplate may contain
@@ -43,7 +44,7 @@ func runCLI(ctx context.Context, t *Tool, inputJSON string) (string, error) {
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(ctx, t.CLI.Command, args...)
+	cmd := childprocess.NewCommand(ctx, t.CLI.Command, args...)
 	if t.CLI.WorkingDir != "" {
 		cmd.Dir = t.CLI.WorkingDir
 	}

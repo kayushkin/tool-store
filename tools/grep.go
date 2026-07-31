@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"strings"
 
-	
+	"github.com/kayushkin/tool-store/internal/childprocess"
 	"github.com/kayushkin/tool-store/schema"
 )
 
@@ -65,7 +65,7 @@ Prefer this over shell grep — it respects .gitignore and is faster.`,
 				}
 			}
 
-			cmd := exec.CommandContext(ctx, bin, args...)
+			cmd := childprocess.NewCommand(ctx, bin, args...)
 			cmd.Env = ensureDevToolsOnPath()
 			out, err := cmd.CombinedOutput()
 			result := strings.TrimSpace(string(out))

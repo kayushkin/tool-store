@@ -4,11 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
-	
+	"github.com/kayushkin/tool-store/internal/childprocess"
 	"github.com/kayushkin/tool-store/schema"
 )
 
@@ -47,8 +46,15 @@ func Shell() Impl {
 			}
 
 			var results []string
-			for _, c := range cmds {
-				cmd := exec.CommandContext(ctx, "bash", "-c", c)
+			for i, c := range cmds {
+				// A cancelled call must not keep starting the commands behind
+				// the one it stopped. Say how many were skipped rather than
+				// returning a run that looks complete.
+				if err := ctx.Err(); err != nil {
+					results = append(results, fmt.Sprintf("(stopped: %s — %d of %d commands not run)", err, len(cmds)-i, len(cmds)))
+					break
+				}
+				cmd := childprocess.NewCommand(ctx, "bash", "-c", c)
 				if in.Workdir != "" {
 					cmd.Dir = in.Workdir
 				}
