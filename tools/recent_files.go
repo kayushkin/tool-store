@@ -5,12 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
-	
+	"github.com/kayushkin/tool-store/internal/childprocess"
 	"github.com/kayushkin/tool-store/schema"
 )
 
@@ -47,7 +46,7 @@ func RecentFiles(rootDir string) Impl {
 			}
 
 			// Find recent files
-			files, err := findRecentlyModified(rootDir, duration)
+			files, err := findRecentlyModified(ctx, rootDir, duration)
 			if err != nil {
 				return "", fmt.Errorf("failed to find recent files: %w", err)
 			}
@@ -70,11 +69,19 @@ type recentFile struct {
 }
 
 // findRecentlyModified finds files modified within the given duration
-func findRecentlyModified(rootDir string, since time.Duration) ([]recentFile, error) {
+func findRecentlyModified(ctx context.Context, rootDir string, since time.Duration) ([]recentFile, error) {
 	// Try git first
-	gitFiles, err := findRecentlyModifiedGit(rootDir, since)
+	gitFiles, err := findRecentlyModifiedGit(ctx, rootDir, since)
 	if err == nil && len(gitFiles) > 0 {
 		return gitFiles, nil
+	}
+
+	// The mtime scan is the fallback for "git could not answer", not for "the
+	// caller stopped asking". Without this check a cancelled git log fails, and
+	// failing is precisely what sends the caller into a full tree walk — so
+	// cancelling the cheap half would start the expensive one.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
 	}
 
 	// Fall back to mtime
@@ -82,7 +89,7 @@ func findRecentlyModified(rootDir string, since time.Duration) ([]recentFile, er
 }
 
 // findRecentlyModifiedGit uses git to find recently modified files
-func findRecentlyModifiedGit(rootDir string, since time.Duration) ([]recentFile, error) {
+func findRecentlyModifiedGit(ctx context.Context, rootDir string, since time.Duration) ([]recentFile, error) {
 	// Check if we're in a git repo
 	gitDir := filepath.Join(rootDir, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
@@ -93,7 +100,7 @@ func findRecentlyModifiedGit(rootDir string, since time.Duration) ([]recentFile,
 	sinceTime := time.Now().Add(-since)
 	sinceArg := sinceTime.Format("2006-01-02 15:04:05")
 
-	cmd := exec.Command("git", "log", "--pretty=format:", "--name-only", "--since", sinceArg)
+	cmd := childprocess.NewCommand(ctx, "git", "log", "--pretty=format:", "--name-only", "--since", sinceArg)
 	cmd.Dir = rootDir
 
 	output, err := cmd.Output()

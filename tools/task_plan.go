@@ -5,11 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
-	
+	"github.com/kayushkin/tool-store/internal/childprocess"
 	"github.com/kayushkin/tool-store/schema"
 )
 
@@ -90,7 +89,7 @@ If it fails, a fix task is added for you. Use the scratchpad tool for working no
 			},
 		}),
 		Run: func(ctx context.Context, raw string) (string, error) {
-			return runTaskPlan(repoRoot, raw)
+			return runTaskPlan(ctx, repoRoot, raw)
 		},
 	}
 }
@@ -103,7 +102,7 @@ type taskPlanInput struct {
 	Description string     `json:"description,omitempty"`
 }
 
-func runTaskPlan(repoRoot, raw string) (string, error) {
+func runTaskPlan(ctx context.Context, repoRoot, raw string) (string, error) {
 	var in taskPlanInput
 	if err := json.Unmarshal([]byte(raw), &in); err != nil {
 		return "", fmt.Errorf("invalid input: %w", err)
@@ -169,7 +168,10 @@ func runTaskPlan(repoRoot, raw string) (string, error) {
 
 	// Auto-build when all tasks complete.
 	if remaining == 0 && completed > 0 {
-		buildResult := runBuild(repoRoot)
+		buildResult := runBuild(ctx, repoRoot)
+		if buildResult.Stopped {
+			return fmt.Sprintf("✓ %d task(s) completed. Auto-build %s", completed, buildResult.Output), nil
+		}
 		if buildResult.Success {
 			return fmt.Sprintf("✓ %d task(s) completed. All done!\n\n🔨 Auto-build passed:\n%s", completed, buildResult.Output), nil
 		}
@@ -281,23 +283,31 @@ func renderPlanMD(plan *TaskPlan) string {
 type BuildResult struct {
 	Success bool
 	Output  string
+	// Stopped reports that the build was cancelled rather than finished. A
+	// stopped build has decided nothing about the code, so callers must not
+	// read it as a failure: doing so writes a "Fix build error" task
+	// describing a build that never ran to completion.
+	Stopped bool
 }
 
 type buildResult = BuildResult
 
-func runBuild(repoRoot string) BuildResult {
+func runBuild(ctx context.Context, repoRoot string) BuildResult {
 	cmd := TaskPlanBuildCommand
 	if cmd == "" {
 		return BuildResult{Success: true, Output: "no build command configured"}
 	}
 
-	proc := exec.Command("bash", "-c", cmd)
+	proc := childprocess.NewCommand(ctx, "bash", "-c", cmd)
 	proc.Dir = repoRoot
 	proc.Env = append(os.Environ(), "PATH="+os.Getenv("PATH"))
 	out, err := proc.CombinedOutput()
 	output := strings.TrimSpace(string(out))
 	if len(output) > 2000 {
 		output = output[:2000] + "\n...(truncated)"
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return BuildResult{Stopped: true, Output: fmt.Sprintf("build stopped: %s", ctxErr)}
 	}
 	if err != nil {
 		return BuildResult{Success: false, Output: output}
@@ -313,9 +323,11 @@ func SavePlanMD(repoRoot string, plan *TaskPlan) error {
 	return savePlan(repoRoot, plan)
 }
 
-// RunBuildCheck runs the build command and returns the result.
-func RunBuildCheck(repoRoot string) buildResult {
-	return runBuild(repoRoot)
+// RunBuildCheck runs the build command and returns the result. Cancelling ctx
+// stops the build and everything it started, and is reported as
+// BuildResult.Stopped rather than as a build failure.
+func RunBuildCheck(ctx context.Context, repoRoot string) buildResult {
+	return runBuild(ctx, repoRoot)
 }
 
 // LoadPlanContext reads the .task.md file and returns it for context injection.
