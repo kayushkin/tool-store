@@ -19,8 +19,27 @@ func Shell() Impl {
 		Workdir  string   `json:"workdir"`
 	}
 	return Impl{
-		Name:        "shell_commands",
-		Description: "Run one or more shell commands. Use commands[] array to run multiple in sequence (preferred). Each turn is expensive — maximize work per call.",
+		Name: "shell_commands",
+		// The no-polling sentence is a cost control, and the schema is the only
+		// place the model ever reads it: it sees the description on every turn
+		// and it never sees a project's notes. It is here rather than in a
+		// harness's prompt because the misuse belongs to this tool.
+		//
+		// Measured on the host that filed this, 2026-08-01: two
+		// `until [ -s FILE ]; do sleep N; done` calls had been running for
+		// 90,830s and 90,362s — over 25 hours each, ~15,000 iterations between
+		// them — waiting on sentinel files that were zero bytes and stayed that
+		// way. Nothing in this tool would ever have stopped them; Shell applies
+		// no timeout of its own, so a waiting command waits for as long as its
+		// caller's context lives.
+		//
+		// The sentence deliberately does not say "this tool has no timeout".
+		// That is true of Shell itself but a consumer may wrap the context in
+		// one, and a description that lies to the model in that harness is
+		// worse than one that only states the rule. Priced against Anthropic's
+		// count_tokens before landing: +52 tokens on the cached prefix, taking
+		// this description from 37 to 89.
+		Description: "Run one or more shell commands. Use commands[] array to run multiple in sequence (preferred). Each turn is expensive — maximize work per call. Never poll — no sleep, no until/while retry loop, no watch. A waiting command holds the session for as long as it waits. Check once and return; if it is not ready, check again on a later turn.",
 		InputSchema: schema.Props([]string{}, map[string]any{
 			"command":  schema.Str("Single shell command to execute"),
 			"commands": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Multiple commands to run sequentially (preferred)"},
