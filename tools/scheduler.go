@@ -8,28 +8,31 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
-	
 	"github.com/kayushkin/tool-store/schema"
 )
 
 // Job represents a scheduler job (from scheduler/internal/db/db.go)
 type Job struct {
-	ID            int64      `json:"id"`
-	Name          string     `json:"name"`
-	Schedule      string     `json:"schedule"`      // cron expression
-	Command       string     `json:"command"`       // shell command
-	Type          string     `json:"type"`          // "shell" or "agent"
-	Agent         string     `json:"agent,omitempty"`
-	Prompt        string     `json:"prompt,omitempty"`
-	Model         string     `json:"model,omitempty"`
-	Orchestrator  string     `json:"orchestrator,omitempty"`   // "claude-code", "inber", etc.
-	SessionID     string     `json:"session_id,omitempty"`     // session to resume
-	Enabled       bool       `json:"enabled"`
-	HoldUntil     *time.Time `json:"hold_until,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ID           int64      `json:"id"`
+	Name         string     `json:"name"`
+	Description  string     `json:"description,omitempty"`
+	Schedule     string     `json:"schedule"` // cron expression
+	Command      string     `json:"command"`  // shell command
+	Type         string     `json:"type"`     // "shell" or "agent"
+	Agent        string     `json:"agent,omitempty"`
+	Prompt       string     `json:"prompt,omitempty"`
+	Model        string     `json:"model,omitempty"`
+	Orchestrator string     `json:"orchestrator,omitempty"` // "claude-code", "inber", etc.
+	SessionID    string     `json:"session_id,omitempty"`   // session to resume
+	WorkspaceID  string     `json:"workspace_id,omitempty"` // noteboard workspace holding durable memory
+	TimeoutSecs  int        `json:"timeout_seconds"`        // per-job wall-clock cap; 0 means the default
+	Enabled      bool       `json:"enabled"`
+	HoldUntil    *time.Time `json:"hold_until,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // Run represents a job execution record
@@ -44,18 +47,21 @@ type Run struct {
 
 // schedulerInput represents the input parameters for the scheduler tool
 type schedulerInput struct {
-	Action        string  `json:"action"`         // "list", "create", "get", "update", "delete", "runs"
-	ID            *int64  `json:"id,omitempty"`   // job ID for get/update/delete/runs actions
-	Name          *string `json:"name,omitempty"` // job name for create
-	Schedule      *string `json:"schedule,omitempty"` // cron expression for create
-	Command       *string `json:"command,omitempty"`  // shell command for create (type=shell)
-	Type          *string `json:"type,omitempty"`     // "shell" or "agent" for create
-	Agent         *string `json:"agent,omitempty"`    // agent name for create (type=agent)
-	Prompt        *string `json:"prompt,omitempty"`   // prompt text for create (type=agent)
-	Model         *string `json:"model,omitempty"`    // model override for create (type=agent)
-	Orchestrator  *string `json:"orchestrator,omitempty"`   // "claude-code", "inber", etc. for create (type=agent)
-	SessionID     *string `json:"session_id,omitempty"`     // session to resume for create (type=agent)
-	Enabled       *bool   `json:"enabled,omitempty"`  // enable/disable for update
+	Action       string  `json:"action"`                    // "list", "create", "get", "update", "delete", "runs"
+	ID           *int64  `json:"id,omitempty"`              // job ID for get/update/delete/runs actions
+	Name         *string `json:"name,omitempty"`            // job name for create
+	Schedule     *string `json:"schedule,omitempty"`        // cron expression for create
+	Command      *string `json:"command,omitempty"`         // shell command for create (type=shell)
+	Type         *string `json:"type,omitempty"`            // "shell" or "agent" for create
+	Agent        *string `json:"agent,omitempty"`           // agent name for create (type=agent)
+	Prompt       *string `json:"prompt,omitempty"`          // prompt text for create (type=agent)
+	Model        *string `json:"model,omitempty"`           // model override for create (type=agent)
+	Orchestrator *string `json:"orchestrator,omitempty"`    // "claude-code", "inber", etc. for create (type=agent)
+	SessionID    *string `json:"session_id,omitempty"`      // session to resume for create (type=agent)
+	WorkspaceID  *string `json:"workspace_id,omitempty"`    // noteboard workspace holding the job's durable memory (type=agent)
+	TimeoutSecs  *int    `json:"timeout_seconds,omitempty"` // per-job wall-clock cap in seconds; 0 means the default
+	Description  *string `json:"description,omitempty"`     // human-readable note about what the job does
+	Enabled      *bool   `json:"enabled,omitempty"`         // enable/disable for update
 }
 
 // Scheduler returns a tool that interacts with the scheduler HTTP API at localhost:8092.
@@ -64,18 +70,21 @@ func Scheduler() Impl {
 		Name:        "scheduler",
 		Description: "Interact with the scheduler HTTP API to manage cron jobs. Supports listing, creating, updating, deleting jobs, and viewing run history.",
 		InputSchema: schema.Props([]string{"action"}, map[string]any{
-			"action":         schema.Str("Action to perform: list, create, get, update, delete, runs"),
-			"id":             schema.Integer("Job ID (required for get, update, delete, runs actions)"),
-			"name":           schema.Str("Job name (required for create)"),
-			"schedule":       schema.Str("Cron expression (required for create)"),
-			"command":        schema.Str("Shell command (required for create with type=shell)"),
-			"type":           schema.Str("Job type: 'shell' or 'agent' (default: shell)"),
-			"agent":          schema.Str("Agent name (required for create with type=agent)"),
-			"prompt":         schema.Str("Prompt text (required for create with type=agent)"),
-			"model":          schema.Str("Model override (optional for type=agent)"),
-			"orchestrator":   schema.Str("Orchestrator name: 'claude-code', 'inber', etc. (default: claude-code)"),
-			"session_id":     schema.Str("Session ID to resume (empty for new session)"),
-			"enabled":        schema.Bool("Enable/disable job (for update action)"),
+			"action":          schema.Str("Action to perform: list, create, get, update, delete, runs"),
+			"id":              schema.Integer("Job ID (required for get, update, delete, runs actions)"),
+			"name":            schema.Str("Job name (required for create; also editable via update)"),
+			"description":     schema.Str("Human-readable note about what the job does"),
+			"schedule":        schema.Str("Cron expression (required for create; also editable via update)"),
+			"command":         schema.Str("Shell command (required for create with type=shell)"),
+			"type":            schema.Str("Job type: 'shell' or 'agent' (default: shell)"),
+			"agent":           schema.Str("Agent name (required for create with type=agent)"),
+			"prompt":          schema.Str("Prompt text (required for create with type=agent)"),
+			"model":           schema.Str("Model override (optional for type=agent)"),
+			"orchestrator":    schema.Str("Orchestrator name: 'claude-code', 'inber', etc. (default: claude-code)"),
+			"session_id":      schema.Str("Session ID to resume (empty for new session)"),
+			"workspace_id":    schema.Str("Noteboard workspace holding the job's durable memory (type=agent)"),
+			"timeout_seconds": schema.Integer("Per-job wall-clock cap in seconds; 0 means the scheduler default"),
+			"enabled":         schema.Bool("Enable/disable job"),
 		}),
 		Run: func(ctx context.Context, raw string) (string, error) {
 			in, err := schema.Parse[schedulerInput](raw)
@@ -89,7 +98,7 @@ func Scheduler() Impl {
 			}
 
 			token := os.Getenv("SCHEDULER_TOKEN")
-			
+
 			switch in.Action {
 			case "list":
 				return handleList(ctx, baseURL, token)
@@ -172,10 +181,10 @@ func handleList(ctx context.Context, baseURL, token string) (string, error) {
 		if job.HoldUntil != nil && job.HoldUntil.After(time.Now()) {
 			status += " (on hold)"
 		}
-		
-		result += fmt.Sprintf("ID: %d\nName: %s\nSchedule: %s\nType: %s\nStatus: %s\n", 
+
+		result += fmt.Sprintf("ID: %d\nName: %s\nSchedule: %s\nType: %s\nStatus: %s\n",
 			job.ID, job.Name, job.Schedule, job.Type, status)
-		
+
 		if job.Type == "shell" {
 			result += fmt.Sprintf("Command: %s\n", job.Command)
 		} else if job.Type == "agent" {
@@ -268,7 +277,7 @@ func handleCreate(ctx context.Context, baseURL, token string, in schedulerInput)
 		return fmt.Sprintf("error parsing response: %s", err), nil
 	}
 
-	return fmt.Sprintf("Created job %d: %s\nSchedule: %s\nType: %s\nEnabled: %t", 
+	return fmt.Sprintf("Created job %d: %s\nSchedule: %s\nType: %s\nEnabled: %t",
 		job.ID, job.Name, job.Schedule, job.Type, job.Enabled), nil
 }
 
@@ -299,11 +308,17 @@ func handleGet(ctx context.Context, baseURL, token string, id int64) (string, er
 
 	result := fmt.Sprintf("Job %d:\nName: %s\nSchedule: %s\nType: %s\nEnabled: %t\n",
 		job.ID, job.Name, job.Schedule, job.Type, job.Enabled)
-	
+
+	if job.Description != "" {
+		result += fmt.Sprintf("Description: %s\n", job.Description)
+	}
+	if job.TimeoutSecs > 0 {
+		result += fmt.Sprintf("Timeout: %ds\n", job.TimeoutSecs)
+	}
 	if job.HoldUntil != nil && job.HoldUntil.After(time.Now()) {
 		result += fmt.Sprintf("On hold until: %s\n", job.HoldUntil.Format(time.RFC3339))
 	}
-	
+
 	if job.Type == "shell" {
 		result += fmt.Sprintf("Command: %s\n", job.Command)
 	} else if job.Type == "agent" {
@@ -317,6 +332,9 @@ func handleGet(ctx context.Context, baseURL, token string, id int64) (string, er
 		if job.SessionID != "" {
 			result += fmt.Sprintf("Session ID: %s\n", job.SessionID)
 		}
+		if job.WorkspaceID != "" {
+			result += fmt.Sprintf("Workspace ID: %s\n", job.WorkspaceID)
+		}
 	}
 
 	result += fmt.Sprintf("Created: %s\nUpdated: %s",
@@ -325,13 +343,49 @@ func handleGet(ctx context.Context, baseURL, token string, id int64) (string, er
 	return result, nil
 }
 
-func handleUpdate(ctx context.Context, baseURL, token string, id int64, in schedulerInput) (string, error) {
-	if in.Enabled == nil {
-		return "error: currently only 'enabled' field can be updated", nil
-	}
+// updatableFields maps each field the update action forwards to the reader that
+// pulls it off the input. PATCH /api/jobs/{id} takes all of them; this tool used
+// to forward only "enabled" and refuse the rest, which meant an agent could
+// create a job with a prompt but never correct one.
+var updatableFields = []struct {
+	Name string
+	Read func(schedulerInput) (any, bool)
+}{
+	{"name", func(in schedulerInput) (any, bool) { return valueOf(in.Name) }},
+	{"description", func(in schedulerInput) (any, bool) { return valueOf(in.Description) }},
+	{"schedule", func(in schedulerInput) (any, bool) { return valueOf(in.Schedule) }},
+	{"command", func(in schedulerInput) (any, bool) { return valueOf(in.Command) }},
+	{"type", func(in schedulerInput) (any, bool) { return valueOf(in.Type) }},
+	{"agent", func(in schedulerInput) (any, bool) { return valueOf(in.Agent) }},
+	{"prompt", func(in schedulerInput) (any, bool) { return valueOf(in.Prompt) }},
+	{"model", func(in schedulerInput) (any, bool) { return valueOf(in.Model) }},
+	{"orchestrator", func(in schedulerInput) (any, bool) { return valueOf(in.Orchestrator) }},
+	{"session_id", func(in schedulerInput) (any, bool) { return valueOf(in.SessionID) }},
+	{"workspace_id", func(in schedulerInput) (any, bool) { return valueOf(in.WorkspaceID) }},
+	{"timeout_seconds", func(in schedulerInput) (any, bool) { return valueOf(in.TimeoutSecs) }},
+	{"enabled", func(in schedulerInput) (any, bool) { return valueOf(in.Enabled) }},
+}
 
-	reqBody := map[string]interface{}{
-		"enabled": *in.Enabled,
+func valueOf[T any](field *T) (any, bool) {
+	if field == nil {
+		return nil, false
+	}
+	return *field, true
+}
+
+func handleUpdate(ctx context.Context, baseURL, token string, id int64, in schedulerInput) (string, error) {
+	reqBody := map[string]interface{}{}
+	var updated []string
+	for _, field := range updatableFields {
+		value, set := field.Read(in)
+		if !set {
+			continue
+		}
+		reqBody[field.Name] = value
+		updated = append(updated, field.Name)
+	}
+	if len(updated) == 0 {
+		return "error: update needs at least one field to change", nil
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -363,12 +417,7 @@ func handleUpdate(ctx context.Context, baseURL, token string, id int64, in sched
 		return fmt.Sprintf("error parsing response: %s", err), nil
 	}
 
-	action := "enabled"
-	if !*in.Enabled {
-		action = "disabled"
-	}
-
-	return fmt.Sprintf("Job %d (%s) %s successfully", job.ID, job.Name, action), nil
+	return fmt.Sprintf("Job %d (%s) updated: %s", job.ID, job.Name, strings.Join(updated, ", ")), nil
 }
 
 func handleDelete(ctx context.Context, baseURL, token string, id int64) (string, error) {
@@ -418,13 +467,13 @@ func handleRuns(ctx context.Context, baseURL, token string, id int64) (string, e
 
 	result := fmt.Sprintf("Found %d runs for job %d:\n\n", len(runs), id)
 	for _, run := range runs {
-		result += fmt.Sprintf("Run %d:\nStatus: %s\nStarted: %s\n", 
+		result += fmt.Sprintf("Run %d:\nStatus: %s\nStarted: %s\n",
 			run.ID, run.Status, run.StartedAt.Format(time.RFC3339))
-		
+
 		if run.FinishedAt != nil {
 			result += fmt.Sprintf("Finished: %s\n", run.FinishedAt.Format(time.RFC3339))
 		}
-		
+
 		if run.Output != "" {
 			// Truncate output if too long
 			output := run.Output
