@@ -115,9 +115,12 @@ func truncateShellOutput(s string) string {
 		if len(s) <= headChars+tailChars {
 			return s
 		}
-		head := s[:headChars]
-		tail := s[len(s)-tailChars:]
-		omitted := len(s) - headChars - tailChars
+		// Both cuts land on a rune boundary, so each can keep slightly fewer
+		// bytes than its budget. Count what was omitted from the two halves
+		// actually kept, or the figure disagrees with the text either side.
+		head := schema.TruncateAtRuneBoundary(s, headChars)
+		tail := schema.SuffixAtRuneBoundary(s, tailChars)
+		omitted := len(s) - len(head) - len(tail)
 		return fmt.Sprintf("%s\n\n[... %d characters omitted ...]\n\n%s", head, omitted, tail)
 	}
 
