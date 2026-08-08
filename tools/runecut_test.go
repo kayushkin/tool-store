@@ -179,6 +179,36 @@ func TestBuildErrorTaskDoesNotSplitARune(t *testing.T) {
 	}
 }
 
+// runBuild cuts at its own budget, and it is a different cut from the one
+// AddBuildErrorTask makes. Sabotage scored this site UNNOTICED until the test
+// below existed: the neighbouring cut was pinned and this one only looked it.
+func TestBuildOutputDoesNotSplitARune(t *testing.T) {
+	const budget = 2000
+	for _, lead := range straddlingLeads(budget) {
+		repoRoot := t.TempDir()
+		payload := strings.Repeat("a", lead) + musicalSymbolGClef + strings.Repeat("b", 500)
+		if err := os.WriteFile(filepath.Join(repoRoot, "payload.txt"), []byte(payload), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		restore := TaskPlanBuildCommand
+		TaskPlanBuildCommand = "cat payload.txt"
+		result := runBuild(context.Background(), repoRoot)
+		TaskPlanBuildCommand = restore
+
+		if !result.Success {
+			t.Fatalf("lead=%d: build did not run: %q", lead, result.Output)
+		}
+		if !utf8.ValidString(result.Output) {
+			t.Errorf("lead=%d: build output is not valid UTF-8", lead)
+		}
+		if want := budget - 3; len(result.Output) < want {
+			t.Errorf("lead=%d: kept %d bytes, lost more than the straddling rune is wide",
+				lead, len(result.Output))
+		}
+	}
+}
+
 func mustJSONString(t *testing.T, s string) string {
 	t.Helper()
 	b, err := json.Marshal(s)
