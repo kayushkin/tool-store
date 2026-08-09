@@ -19,9 +19,22 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from sabotage import Case, REPO, problems, score  # noqa: E402
+from sabotage import Case, REPO, counts_as_coverage, problems, score  # noqa: E402
 
 PACKAGES = ["./schema/", "./tools/"]
+
+# The fixture guards in the packages above, by message. A guard fires when a
+# mutation stops the test input reaching the code under test; `go test` exits
+# non-zero for that exactly as it does for a real assertion, so without these
+# the engine counts the test falling over as coverage. See
+# sabotage.classify_caught().
+#
+# Only tools/runecut_test.go:121 is in scope here. The repo's other guard,
+# provision_test.go:193 ("instance opt-in did not reach the config"), sits in
+# the root package, which PACKAGES does not run.
+GUARD_MARKERS = (
+    "input was not truncated at all, so the test proves nothing",
+)
 
 HELPER = REPO / "schema" / "runeboundary.go"
 
@@ -108,13 +121,16 @@ def main():
         print("\n" + "=" * 62)
         print("target: %s" % target.relative_to(REPO))
         print("=" * 62)
-        results = score(target, PACKAGES, cases)
+        results = score(target, PACKAGES, cases, GUARD_MARKERS)
         found += problems(results)
-        for case, verdict, _ in results:
+        for case, verdict, _, _ in results:
             if case.name.startswith("CONTROL"):
                 continue
             total_real += 1
-            if verdict == "CAUGHT":
+            # counts_as_coverage, not `verdict == "CAUGHT"`: a row that went red
+            # because a fixture guard fired is not a mechanism this suite pins,
+            # and adding it in here is the inflation the split exists to stop.
+            if counts_as_coverage(verdict):
                 total_caught += 1
 
     print("\n" + "=" * 62)
