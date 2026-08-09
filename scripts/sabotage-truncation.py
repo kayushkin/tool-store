@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from sabotage import Case, REPO, score  # noqa: E402
+from sabotage import Case, REPO, problems, score  # noqa: E402
 
 PACKAGES = ["./schema/", "./tools/"]
 
@@ -101,7 +101,7 @@ CALL_SITES = {
 def main():
     total_caught = 0
     total_real = 0
-    problems = 0
+    found = []
 
     targets = [(HELPER, HELPER_CASES)] + list(CALL_SITES.items())
     for target, cases in targets:
@@ -109,21 +109,29 @@ def main():
         print("target: %s" % target.relative_to(REPO))
         print("=" * 62)
         results = score(target, PACKAGES, cases)
+        found += problems(results)
         for case, verdict, _ in results:
             if case.name.startswith("CONTROL"):
                 continue
             total_real += 1
             if verdict == "CAUGHT":
                 total_caught += 1
-            else:
-                problems += 1
 
     print("\n" + "=" * 62)
     print("TOTAL: %d/%d real mechanisms caught across %d files"
           % (total_caught, total_real, len(targets)))
-    if problems:
-        print("  ⚠️  %d mechanism(s) not pinned — see the tables above" % problems)
+    if found:
+        print("  ⚠️  %d problem(s) across the tables above" % len(found))
+
+    # Ask the engine what went wrong rather than counting non-CAUGHT rows here.
+    # The private counter this replaced was a second, weaker definition of the
+    # same thing: it skipped every CONTROL, so a known-positive control that
+    # went UNNOTICED — the suite not running at all — added nothing to it, and
+    # it ignored expected_unnoticed, so the first KNOWN GAP case added here
+    # would have counted as a failure. Two definitions of "wrong" drift, and
+    # the copy is the half nobody re-reads.
+    return 1 if found else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
