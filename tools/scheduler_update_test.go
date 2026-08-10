@@ -25,10 +25,26 @@ import (
 // point of reading the echo instead of the request.
 var fieldsTheOlderSchedulerHonours = []string{"enabled", "description", "timeout_seconds"}
 
-// fakeScheduler serves PATCH /api/jobs/{id} over a job it holds, applying only
-// the fields it was told to honour and silently keeping its own value for the
-// rest — which is what the deployed scheduler does.
-func fakeScheduler(t *testing.T, job Job, honoured []string) (baseURL string, lastRequestBody func() map[string]any) {
+// recordedRequest is what the fake saw. The verb is recorded and not only the
+// body because a case list made entirely of one verb cannot see a handler that
+// hardcodes it: every case here used to be a PATCH, so nothing would have
+// noticed create sending one too.
+type recordedRequest struct {
+	Method string
+	Path   string
+	Body   map[string]any
+}
+
+// fakeScheduler serves POST /api/jobs and PATCH /api/jobs/{id} over a job it
+// holds, applying only the fields it was told to honour and silently keeping
+// its own value for the rest — which is what the deployed scheduler does on
+// both verbs.
+//
+// It also models the create decoder's one refusal: the real POST struct has no
+// enabled field and decodes strictly, so a request carrying that key is a 400
+// rather than a disabled job. A tool that starts sending it fails here loudly
+// instead of silently producing a live cron job the caller believes is off.
+func fakeScheduler(t *testing.T, job Job, honoured []string) (baseURL string, lastRequest func() recordedRequest) {
 	t.Helper()
 
 	honours := map[string]bool{}
@@ -36,17 +52,23 @@ func fakeScheduler(t *testing.T, job Job, honoured []string) (baseURL string, la
 		honours[name] = true
 	}
 
-	var received map[string]any
+	var seen recordedRequest
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "PATCH" {
-			t.Errorf("fake scheduler got %s, want PATCH", r.Method)
+		if r.Method != "POST" && r.Method != "PATCH" {
+			t.Errorf("fake scheduler got %s, want POST or PATCH", r.Method)
 		}
-		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+		seen = recordedRequest{Method: r.Method, Path: r.URL.Path}
+		if err := json.NewDecoder(r.Body).Decode(&seen.Body); err != nil {
 			t.Errorf("fake scheduler could not decode the request body: %s", err)
 		}
 
-		for name, value := range received {
+		if _, present := seen.Body["enabled"]; present && r.Method == "POST" {
+			http.Error(w, `{"error":"invalid request body","detail":"json: unknown field \"enabled\""}`, 400)
+			return
+		}
+
+		for name, value := range seen.Body {
 			if !honours[name] {
 				continue
 			}
@@ -59,8 +81,20 @@ func fakeScheduler(t *testing.T, job Job, honoured []string) (baseURL string, la
 				job.Schedule = value.(string)
 			case "command":
 				job.Command = value.(string)
+			case "type":
+				job.Type = value.(string)
+			case "agent":
+				job.Agent = value.(string)
 			case "prompt":
 				job.Prompt = value.(string)
+			case "model":
+				job.Model = value.(string)
+			case "orchestrator":
+				job.Orchestrator = value.(string)
+			case "session_id":
+				job.SessionID = value.(string)
+			case "workspace_id":
+				job.WorkspaceID = value.(string)
 			case "timeout_seconds":
 				job.TimeoutSecs = int(value.(float64))
 			case "enabled":
@@ -71,13 +105,16 @@ func fakeScheduler(t *testing.T, job Job, honoured []string) (baseURL string, la
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+		if r.Method == "POST" {
+			w.WriteHeader(http.StatusCreated)
+		}
 		if err := json.NewEncoder(w).Encode(job); err != nil {
 			t.Errorf("fake scheduler could not encode its reply: %s", err)
 		}
 	}))
 	t.Cleanup(server.Close)
 
-	return server.URL, func() map[string]any { return received }
+	return server.URL, func() recordedRequest { return seen }
 }
 
 func stringPointer(value string) *string { return &value }
@@ -182,7 +219,7 @@ func TestUpdateSeparatesTheAppliedFieldsFromTheDroppedOnes(t *testing.T) {
 // place. This is the half b21b4bb fixed, and it stays pinned so a later change
 // cannot go back to sending nothing and reporting the echo as agreement.
 func TestUpdateForwardsEveryFieldTheCallerNamed(t *testing.T) {
-	baseURL, lastRequestBody := fakeScheduler(t, jobBeforeUpdate(), fieldsTheOlderSchedulerHonours)
+	baseURL, lastRequest := fakeScheduler(t, jobBeforeUpdate(), fieldsTheOlderSchedulerHonours)
 
 	if _, err := handleUpdate(context.Background(), baseURL, "", 50, schedulerInput{
 		Schedule: stringPointer("0 6 * * *"),
@@ -191,7 +228,10 @@ func TestUpdateForwardsEveryFieldTheCallerNamed(t *testing.T) {
 		t.Fatalf("handleUpdate returned an error: %s", err)
 	}
 
-	sent := lastRequestBody()
+	if method := lastRequest().Method; method != "PATCH" {
+		t.Errorf("update sent %s, want PATCH", method)
+	}
+	sent := lastRequest().Body
 	for field, want := range map[string]string{"schedule": "0 6 * * *", "prompt": "summarise yesterday"} {
 		if got, present := sent[field]; !present {
 			t.Errorf("the request never carried %q", field)
