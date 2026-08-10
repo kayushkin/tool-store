@@ -84,7 +84,7 @@ func Scheduler() Impl {
 			"session_id":      schema.Str("Session ID to resume (empty for new session)"),
 			"workspace_id":    schema.Str("Noteboard workspace holding the job's durable memory (type=agent)"),
 			"timeout_seconds": schema.Integer("Per-job wall-clock cap in seconds; 0 means the scheduler default"),
-			"enabled":         schema.Bool("Enable/disable job"),
+			"enabled":         schema.Bool("Enable/disable job (update only; the scheduler always creates a job enabled, so this is ignored on create)"),
 		}),
 		Run: func(ctx context.Context, raw string) (string, error) {
 			in, err := schema.Parse[schedulerInput](raw)
@@ -227,29 +227,29 @@ func handleCreate(ctx context.Context, baseURL, token string, in schedulerInput)
 		return "error: agent and prompt are required for agent jobs", nil
 	}
 
-	reqBody := map[string]interface{}{
-		"name":     *in.Name,
-		"schedule": *in.Schedule,
-		"type":     jobType,
-	}
+	// The caller may have named no type, and the job still gets one. Putting
+	// the defaulted value back on the input means the field table forwards it
+	// like any other, and the report names the type the job actually got
+	// rather than staying silent about a value the caller never chose.
+	normalisedInput := in
+	normalisedInput.Type = &jobType
 
-	if in.Command != nil {
-		reqBody["command"] = *in.Command
-	}
-	if in.Agent != nil {
-		reqBody["agent"] = *in.Agent
-	}
-	if in.Prompt != nil {
-		reqBody["prompt"] = *in.Prompt
-	}
-	if in.Model != nil {
-		reqBody["model"] = *in.Model
-	}
-	if in.Orchestrator != nil {
-		reqBody["orchestrator"] = *in.Orchestrator
-	}
-	if in.SessionID != nil {
-		reqBody["session_id"] = *in.SessionID
+	reqBody := map[string]interface{}{}
+	var requestedFields []requestedChange
+	for _, field := range schedulerJobFields {
+		if !field.AcceptedOnCreate {
+			continue
+		}
+		value, set := field.ReadRequested(normalisedInput)
+		if !set {
+			continue
+		}
+		reqBody[field.Name] = value
+		requestedFields = append(requestedFields, requestedChange{
+			Name:       field.Name,
+			Value:      value,
+			ReadEchoed: field.ReadEchoed,
+		})
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -277,8 +277,41 @@ func handleCreate(ctx context.Context, baseURL, token string, in schedulerInput)
 		return fmt.Sprintf("error parsing response: %s", err), nil
 	}
 
-	return fmt.Sprintf("Created job %d: %s\nSchedule: %s\nType: %s\nEnabled: %t",
-		job.ID, job.Name, job.Schedule, job.Type, job.Enabled), nil
+	return describeCreateOutcome(job, requestedFields, in.Enabled != nil), nil
+}
+
+// describeCreateOutcome reports the created job and, for each field the caller
+// named, whether the server actually stored it — judged against the row the
+// server echoed back rather than against the request that was sent.
+//
+// The old report named four fields and nothing else, so a create that dropped
+// a description, a timeout or a workspace looked identical to one that kept
+// them. workspace_id is the one with teeth: an agent job's durable memory is
+// bound by that field, and a job that lost it reads as a job that was never
+// given one.
+func describeCreateOutcome(job Job, requestedFields []requestedChange, callerNamedEnabled bool) string {
+	stored, dropped := partitionByWhatTheServerStored(job, requestedFields)
+
+	result := fmt.Sprintf("Created job %d: %s\nSchedule: %s\nType: %s\nEnabled: %t\n",
+		job.ID, job.Name, job.Schedule, job.Type, job.Enabled)
+
+	if len(dropped) > 0 {
+		// The server answered 201 to something it did not fully do, so say
+		// that plainly. A caller who reads only this line still learns a
+		// field did not land.
+		result += fmt.Sprintf("The server stored only %d of the %d fields sent.\n",
+			len(stored), len(requestedFields))
+	}
+	result += fmt.Sprintf("Stored: %s\n", strings.Join(stored, ", "))
+	if len(dropped) > 0 {
+		result += fmt.Sprintf("NOT stored: %s\n", strings.Join(dropped, ", "))
+	}
+
+	if callerNamedEnabled {
+		result += fmt.Sprintf("Note: enabled was not sent — the scheduler's create request has no such field and a new job is always inserted enabled. The job above is Enabled: %t. Use action=update to change it.\n", job.Enabled)
+	}
+
+	return strings.TrimRight(result, "\n")
 }
 
 func handleGet(ctx context.Context, baseURL, token string, id int64) (string, error) {
@@ -343,37 +376,57 @@ func handleGet(ctx context.Context, baseURL, token string, id int64) (string, er
 	return result, nil
 }
 
-// updatableFields maps each field the update action forwards to the reader that
-// pulls it off the input, and to the reader that pulls the same field back off
-// the job the server echoes in its reply. This tool used to forward only
-// "enabled" and refuse the rest, which meant an agent could create a job with a
-// prompt but never correct one.
+// schedulerJobField is one field of a scheduler job as this tool handles it:
+// the wire name, which of the two write verbs the server decodes it on, the
+// reader that pulls the value off the tool's input, and the reader that pulls
+// the same field back off the job the server echoes in its reply.
 //
 // Both readers exist because a scheduler that will not apply a field does not
-// say so: it answers 200 with the unchanged row. Whether PATCH honours all
-// thirteen depends on which build is serving :8092 — HEAD takes every field,
-// while older binaries take only enabled, description and timeout_seconds and
-// silently drop the rest. Reading the echo instead of trusting the request is
-// correct against either, so this tool never has to know which one it is
-// talking to.
-var updatableFields = []struct {
-	Name          string
-	ReadRequested func(schedulerInput) (any, bool)
-	ReadEchoed    func(Job) any
-}{
-	{"name", func(in schedulerInput) (any, bool) { return valueOf(in.Name) }, func(j Job) any { return j.Name }},
-	{"description", func(in schedulerInput) (any, bool) { return valueOf(in.Description) }, func(j Job) any { return j.Description }},
-	{"schedule", func(in schedulerInput) (any, bool) { return valueOf(in.Schedule) }, func(j Job) any { return j.Schedule }},
-	{"command", func(in schedulerInput) (any, bool) { return valueOf(in.Command) }, func(j Job) any { return j.Command }},
-	{"type", func(in schedulerInput) (any, bool) { return valueOf(in.Type) }, func(j Job) any { return j.Type }},
-	{"agent", func(in schedulerInput) (any, bool) { return valueOf(in.Agent) }, func(j Job) any { return j.Agent }},
-	{"prompt", func(in schedulerInput) (any, bool) { return valueOf(in.Prompt) }, func(j Job) any { return j.Prompt }},
-	{"model", func(in schedulerInput) (any, bool) { return valueOf(in.Model) }, func(j Job) any { return j.Model }},
-	{"orchestrator", func(in schedulerInput) (any, bool) { return valueOf(in.Orchestrator) }, func(j Job) any { return j.Orchestrator }},
-	{"session_id", func(in schedulerInput) (any, bool) { return valueOf(in.SessionID) }, func(j Job) any { return j.SessionID }},
-	{"workspace_id", func(in schedulerInput) (any, bool) { return valueOf(in.WorkspaceID) }, func(j Job) any { return j.WorkspaceID }},
-	{"timeout_seconds", func(in schedulerInput) (any, bool) { return valueOf(in.TimeoutSecs) }, func(j Job) any { return j.TimeoutSecs }},
-	{"enabled", func(in schedulerInput) (any, bool) { return valueOf(in.Enabled) }, func(j Job) any { return j.Enabled }},
+// say so: it answers 200 or 201 with a row that does not hold the value. Which
+// fields PATCH honours depends on which build is serving :8092 — HEAD takes
+// every field, while older binaries take only enabled, description and
+// timeout_seconds and silently drop the rest. Reading the echo instead of
+// trusting the request is correct against either, so this tool never has to
+// know which one it is talking to.
+type schedulerJobField struct {
+	Name string
+	// AcceptedOnCreate records whether POST /api/jobs decodes this field.
+	// Twelve of the thirteen are accepted on both verbs; see the enabled row
+	// for the one that is not.
+	AcceptedOnCreate bool
+	ReadRequested    func(schedulerInput) (any, bool)
+	ReadEchoed       func(Job) any
+}
+
+// schedulerJobFields is the single authoring of the field list both write
+// paths work from. Create used to name its own nine keys inline and update
+// forwarded only "enabled", so the two paths disagreed about the same job in
+// two different directions: an agent could not correct a job it had created,
+// and a job created with a description, a timeout or a workspace lost all
+// three on the way out.
+var schedulerJobFields = []schedulerJobField{
+	{"name", true, func(in schedulerInput) (any, bool) { return valueOf(in.Name) }, func(j Job) any { return j.Name }},
+	{"description", true, func(in schedulerInput) (any, bool) { return valueOf(in.Description) }, func(j Job) any { return j.Description }},
+	{"schedule", true, func(in schedulerInput) (any, bool) { return valueOf(in.Schedule) }, func(j Job) any { return j.Schedule }},
+	{"command", true, func(in schedulerInput) (any, bool) { return valueOf(in.Command) }, func(j Job) any { return j.Command }},
+	{"type", true, func(in schedulerInput) (any, bool) { return valueOf(in.Type) }, func(j Job) any { return j.Type }},
+	{"agent", true, func(in schedulerInput) (any, bool) { return valueOf(in.Agent) }, func(j Job) any { return j.Agent }},
+	{"prompt", true, func(in schedulerInput) (any, bool) { return valueOf(in.Prompt) }, func(j Job) any { return j.Prompt }},
+	{"model", true, func(in schedulerInput) (any, bool) { return valueOf(in.Model) }, func(j Job) any { return j.Model }},
+	{"orchestrator", true, func(in schedulerInput) (any, bool) { return valueOf(in.Orchestrator) }, func(j Job) any { return j.Orchestrator }},
+	{"session_id", true, func(in schedulerInput) (any, bool) { return valueOf(in.SessionID) }, func(j Job) any { return j.SessionID }},
+	{"workspace_id", true, func(in schedulerInput) (any, bool) { return valueOf(in.WorkspaceID) }, func(j Job) any { return j.WorkspaceID }},
+	{"timeout_seconds", true, func(in schedulerInput) (any, bool) { return valueOf(in.TimeoutSecs) }, func(j Job) any { return j.TimeoutSecs }},
+
+	// Not accepted on create, and sending it anyway is worse than dropping
+	// it. The scheduler's create request struct has no enabled field at all
+	// and db.go sets Enabled = true on insert, so the key cannot disable a
+	// new job on any build. On HEAD the create decoder is strict, which
+	// turns the key into a 400; on the deployed binary it is swallowed. The
+	// create path reports the omission rather than sending it — a caller who
+	// asked for a disabled job and was not told otherwise would walk away
+	// believing a live cron job was off.
+	{"enabled", false, func(in schedulerInput) (any, bool) { return valueOf(in.Enabled) }, func(j Job) any { return j.Enabled }},
 }
 
 func valueOf[T any](field *T) (any, bool) {
@@ -395,7 +448,7 @@ func describeValue(value any) string {
 func handleUpdate(ctx context.Context, baseURL, token string, id int64, in schedulerInput) (string, error) {
 	reqBody := map[string]interface{}{}
 	var requestedChanges []requestedChange
-	for _, field := range updatableFields {
+	for _, field := range schedulerJobFields {
 		value, set := field.ReadRequested(in)
 		if !set {
 			continue
@@ -453,6 +506,29 @@ type requestedChange struct {
 	ReadEchoed func(Job) any
 }
 
+// partitionByWhatTheServerStored splits the requested fields into the ones the
+// echoed job agrees with and the ones it does not, naming both values for each
+// disagreement. Create and update share it because they share the hazard: both
+// verbs answer success while quietly keeping a value the caller did not ask
+// for.
+//
+// Every value compared here is a string, an int or a bool read off the typed
+// Job, so == is both safe and exact. It would not be if either side arrived as
+// a JSON-decoded any — an int and a float64 are never equal, and a numeric
+// field would then report itself as dropped forever.
+func partitionByWhatTheServerStored(job Job, requestedFields []requestedChange) (stored, dropped []string) {
+	for _, requested := range requestedFields {
+		echoed := requested.ReadEchoed(job)
+		if echoed == requested.Value {
+			stored = append(stored, requested.Name)
+			continue
+		}
+		dropped = append(dropped, fmt.Sprintf("%s (asked for %s, job reads %s)",
+			requested.Name, describeValue(requested.Value), describeValue(echoed)))
+	}
+	return stored, dropped
+}
+
 // describeUpdateOutcome reports which of the requested fields the server
 // actually applied, judged by comparing each one against the job the server
 // echoed back rather than against the request that was sent.
@@ -462,16 +538,7 @@ type requestedChange struct {
 // Every value compared here is a string, an int or a bool, so == is both safe
 // and exact.
 func describeUpdateOutcome(job Job, requestedChanges []requestedChange) string {
-	var applied, dropped []string
-	for _, change := range requestedChanges {
-		echoed := change.ReadEchoed(job)
-		if echoed == change.Value {
-			applied = append(applied, change.Name)
-			continue
-		}
-		dropped = append(dropped, fmt.Sprintf("%s (asked for %s, job still reads %s)",
-			change.Name, describeValue(change.Value), describeValue(echoed)))
-	}
+	applied, dropped := partitionByWhatTheServerStored(job, requestedChanges)
 
 	if len(dropped) == 0 {
 		return fmt.Sprintf("Job %d (%s) updated: %s", job.ID, job.Name, strings.Join(applied, ", "))
