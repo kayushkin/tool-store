@@ -357,26 +357,36 @@ func handleGet(ctx context.Context, baseURL, token string, id int64) (string, er
 }
 
 // updatableFields maps each field the update action forwards to the reader that
-// pulls it off the input. PATCH /api/jobs/{id} takes all of them; this tool used
-// to forward only "enabled" and refuse the rest, which meant an agent could
-// create a job with a prompt but never correct one.
+// pulls it off the input, and to the reader that pulls the same field back off
+// the job the server echoes in its reply. This tool used to forward only
+// "enabled" and refuse the rest, which meant an agent could create a job with a
+// prompt but never correct one.
+//
+// Both readers exist because a scheduler that will not apply a field does not
+// say so: it answers 200 with the unchanged row. Whether PATCH honours all
+// thirteen depends on which build is serving :8092 — HEAD takes every field,
+// while older binaries take only enabled, description and timeout_seconds and
+// silently drop the rest. Reading the echo instead of trusting the request is
+// correct against either, so this tool never has to know which one it is
+// talking to.
 var updatableFields = []struct {
-	Name string
-	Read func(schedulerInput) (any, bool)
+	Name          string
+	ReadRequested func(schedulerInput) (any, bool)
+	ReadEchoed    func(Job) any
 }{
-	{"name", func(in schedulerInput) (any, bool) { return valueOf(in.Name) }},
-	{"description", func(in schedulerInput) (any, bool) { return valueOf(in.Description) }},
-	{"schedule", func(in schedulerInput) (any, bool) { return valueOf(in.Schedule) }},
-	{"command", func(in schedulerInput) (any, bool) { return valueOf(in.Command) }},
-	{"type", func(in schedulerInput) (any, bool) { return valueOf(in.Type) }},
-	{"agent", func(in schedulerInput) (any, bool) { return valueOf(in.Agent) }},
-	{"prompt", func(in schedulerInput) (any, bool) { return valueOf(in.Prompt) }},
-	{"model", func(in schedulerInput) (any, bool) { return valueOf(in.Model) }},
-	{"orchestrator", func(in schedulerInput) (any, bool) { return valueOf(in.Orchestrator) }},
-	{"session_id", func(in schedulerInput) (any, bool) { return valueOf(in.SessionID) }},
-	{"workspace_id", func(in schedulerInput) (any, bool) { return valueOf(in.WorkspaceID) }},
-	{"timeout_seconds", func(in schedulerInput) (any, bool) { return valueOf(in.TimeoutSecs) }},
-	{"enabled", func(in schedulerInput) (any, bool) { return valueOf(in.Enabled) }},
+	{"name", func(in schedulerInput) (any, bool) { return valueOf(in.Name) }, func(j Job) any { return j.Name }},
+	{"description", func(in schedulerInput) (any, bool) { return valueOf(in.Description) }, func(j Job) any { return j.Description }},
+	{"schedule", func(in schedulerInput) (any, bool) { return valueOf(in.Schedule) }, func(j Job) any { return j.Schedule }},
+	{"command", func(in schedulerInput) (any, bool) { return valueOf(in.Command) }, func(j Job) any { return j.Command }},
+	{"type", func(in schedulerInput) (any, bool) { return valueOf(in.Type) }, func(j Job) any { return j.Type }},
+	{"agent", func(in schedulerInput) (any, bool) { return valueOf(in.Agent) }, func(j Job) any { return j.Agent }},
+	{"prompt", func(in schedulerInput) (any, bool) { return valueOf(in.Prompt) }, func(j Job) any { return j.Prompt }},
+	{"model", func(in schedulerInput) (any, bool) { return valueOf(in.Model) }, func(j Job) any { return j.Model }},
+	{"orchestrator", func(in schedulerInput) (any, bool) { return valueOf(in.Orchestrator) }, func(j Job) any { return j.Orchestrator }},
+	{"session_id", func(in schedulerInput) (any, bool) { return valueOf(in.SessionID) }, func(j Job) any { return j.SessionID }},
+	{"workspace_id", func(in schedulerInput) (any, bool) { return valueOf(in.WorkspaceID) }, func(j Job) any { return j.WorkspaceID }},
+	{"timeout_seconds", func(in schedulerInput) (any, bool) { return valueOf(in.TimeoutSecs) }, func(j Job) any { return j.TimeoutSecs }},
+	{"enabled", func(in schedulerInput) (any, bool) { return valueOf(in.Enabled) }, func(j Job) any { return j.Enabled }},
 }
 
 func valueOf[T any](field *T) (any, bool) {
@@ -386,18 +396,31 @@ func valueOf[T any](field *T) (any, bool) {
 	return *field, true
 }
 
+// describeValue quotes strings and leaves everything else alone, so that a
+// field the server blanked reads as "" rather than as nothing at all.
+func describeValue(value any) string {
+	if text, isString := value.(string); isString {
+		return fmt.Sprintf("%q", text)
+	}
+	return fmt.Sprintf("%v", value)
+}
+
 func handleUpdate(ctx context.Context, baseURL, token string, id int64, in schedulerInput) (string, error) {
 	reqBody := map[string]interface{}{}
-	var updated []string
+	var requestedChanges []requestedChange
 	for _, field := range updatableFields {
-		value, set := field.Read(in)
+		value, set := field.ReadRequested(in)
 		if !set {
 			continue
 		}
 		reqBody[field.Name] = value
-		updated = append(updated, field.Name)
+		requestedChanges = append(requestedChanges, requestedChange{
+			Name:       field.Name,
+			Value:      value,
+			ReadEchoed: field.ReadEchoed,
+		})
 	}
-	if len(updated) == 0 {
+	if len(requestedChanges) == 0 {
 		return "error: update needs at least one field to change", nil
 	}
 
@@ -430,7 +453,58 @@ func handleUpdate(ctx context.Context, baseURL, token string, id int64, in sched
 		return fmt.Sprintf("error parsing response: %s", err), nil
 	}
 
-	return fmt.Sprintf("Job %d (%s) updated: %s", job.ID, job.Name, strings.Join(updated, ", ")), nil
+	return describeUpdateOutcome(job, requestedChanges), nil
+}
+
+// requestedChange is one field the caller asked to change, carrying the value
+// asked for and the reader that finds the same field on the echoed job. The
+// reader travels with the value rather than being looked up again by name, so
+// the two halves cannot drift apart.
+type requestedChange struct {
+	Name       string
+	Value      any
+	ReadEchoed func(Job) any
+}
+
+// describeUpdateOutcome reports which of the requested fields the server
+// actually applied, judged by comparing each one against the job the server
+// echoed back rather than against the request that was sent.
+//
+// A scheduler that refuses a field answers 200 and returns the row unchanged,
+// so a report built from the request alone announces edits that never happened.
+// Every value compared here is a string, an int or a bool, so == is both safe
+// and exact.
+func describeUpdateOutcome(job Job, requestedChanges []requestedChange) string {
+	var applied, dropped []string
+	for _, change := range requestedChanges {
+		echoed := change.ReadEchoed(job)
+		if echoed == change.Value {
+			applied = append(applied, change.Name)
+			continue
+		}
+		dropped = append(dropped, fmt.Sprintf("%s (asked for %s, job still reads %s)",
+			change.Name, describeValue(change.Value), describeValue(echoed)))
+	}
+
+	if len(dropped) == 0 {
+		return fmt.Sprintf("Job %d (%s) updated: %s", job.ID, job.Name, strings.Join(applied, ", "))
+	}
+
+	// The server said 200 to something it did not do, so say that first and
+	// plainly. A caller that reads only the opening line still learns the edit
+	// did not land.
+	headline := fmt.Sprintf("Job %d (%s) update was only PARTIALLY applied", job.ID, job.Name)
+	if len(applied) == 0 {
+		headline = fmt.Sprintf("Job %d (%s) update changed NOTHING", job.ID, job.Name)
+	}
+
+	result := fmt.Sprintf("%s — the server answered 200 but its reply still holds the old value for %d of the %d fields sent.\n",
+		headline, len(dropped), len(requestedChanges))
+	if len(applied) > 0 {
+		result += fmt.Sprintf("Applied: %s\n", strings.Join(applied, ", "))
+	}
+	result += fmt.Sprintf("NOT applied: %s", strings.Join(dropped, ", "))
+	return result
 }
 
 func handleDelete(ctx context.Context, baseURL, token string, id int64) (string, error) {
