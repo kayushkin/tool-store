@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,16 +36,23 @@ type recordedRequest struct {
 	Body   map[string]any
 }
 
-// fakeScheduler serves POST /api/jobs and PATCH /api/jobs/{id} over a job it
-// holds, applying only the fields it was told to honour and silently keeping
-// its own value for the rest — which is what the deployed scheduler does on
-// both verbs.
+// fakeScheduler serves the scheduler's two write verbs and its two read routes
+// over a job it holds — POST /api/jobs, PATCH /api/jobs/{id}, GET /api/jobs and
+// GET /api/jobs/{id}. On the write verbs it applies only the fields it was told
+// to honour and silently keeps its own value for the rest, which is what the
+// deployed scheduler does.
 //
 // It also models the create decoder's one refusal: the real POST struct has no
 // enabled field and decodes strictly, so a request carrying that key is a 400
 // rather than a disabled job. A tool that starts sending it fails here loudly
 // instead of silently producing a live cron job the caller believes is off.
-func fakeScheduler(t *testing.T, job Job, honoured []string) (baseURL string, lastRequest func() recordedRequest) {
+//
+// The read routes serve `job` plus any alsoListed jobs. They exist because the
+// read paths are a third authoring of the same field list and were measured to
+// have their own omissions — extending this fake was cheaper and truer than a
+// second one, which would have been free to disagree with this about the shape
+// of a job.
+func fakeScheduler(t *testing.T, job Job, honoured []string, alsoListed ...Job) (baseURL string, lastRequest func() recordedRequest) {
 	t.Helper()
 
 	honours := map[string]bool{}
@@ -55,10 +63,29 @@ func fakeScheduler(t *testing.T, job Job, honoured []string) (baseURL string, la
 	var seen recordedRequest
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" && r.Method != "PATCH" {
-			t.Errorf("fake scheduler got %s, want POST or PATCH", r.Method)
+		if r.Method != "POST" && r.Method != "PATCH" && r.Method != "GET" {
+			t.Errorf("fake scheduler got %s, want POST, PATCH or GET", r.Method)
 		}
 		seen = recordedRequest{Method: r.Method, Path: r.URL.Path}
+
+		if r.Method == "GET" {
+			served := append([]Job{job}, alsoListed...)
+			w.Header().Set("Content-Type", "application/json")
+			var reply any = served
+			if r.URL.Path != "/api/jobs" {
+				match, found := jobServedAt(served, r.URL.Path)
+				if !found {
+					http.Error(w, `{"error":"job not found"}`, 404)
+					return
+				}
+				reply = match
+			}
+			if err := json.NewEncoder(w).Encode(reply); err != nil {
+				t.Errorf("fake scheduler could not encode its reply: %s", err)
+			}
+			return
+		}
+
 		if err := json.NewDecoder(r.Body).Decode(&seen.Body); err != nil {
 			t.Errorf("fake scheduler could not decode the request body: %s", err)
 		}
@@ -115,6 +142,17 @@ func fakeScheduler(t *testing.T, job Job, honoured []string) (baseURL string, la
 	t.Cleanup(server.Close)
 
 	return server.URL, func() recordedRequest { return seen }
+}
+
+// jobServedAt finds the job whose id ends the request path, so that GET of an
+// id the fake was never given is a 404 and not somebody else's job.
+func jobServedAt(served []Job, path string) (Job, bool) {
+	for _, candidate := range served {
+		if path == fmt.Sprintf("/api/jobs/%d", candidate.ID) {
+			return candidate, true
+		}
+	}
+	return Job{}, false
 }
 
 func stringPointer(value string) *string { return &value }

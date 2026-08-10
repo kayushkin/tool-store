@@ -174,35 +174,22 @@ func handleList(ctx context.Context, baseURL, token string) (string, error) {
 
 	result := fmt.Sprintf("Found %d jobs:\n\n", len(jobs))
 	for _, job := range jobs {
-		status := "enabled"
-		if !job.Enabled {
-			status = "disabled"
-		}
-		if job.HoldUntil != nil && job.HoldUntil.After(time.Now()) {
-			status += " (on hold)"
-		}
-
-		result += fmt.Sprintf("ID: %d\nName: %s\nSchedule: %s\nType: %s\nStatus: %s\n",
-			job.ID, job.Name, job.Schedule, job.Type, status)
-
-		if job.Type == "shell" {
-			result += fmt.Sprintf("Command: %s\n", job.Command)
-		} else if job.Type == "agent" {
-			result += fmt.Sprintf("Agent: %s\nPrompt: %s\n", job.Agent, job.Prompt)
-			if job.Model != "" {
-				result += fmt.Sprintf("Model: %s\n", job.Model)
-			}
-			if job.Orchestrator != "" {
-				result += fmt.Sprintf("Orchestrator: %s\n", job.Orchestrator)
-			}
-			if job.SessionID != "" {
-				result += fmt.Sprintf("Session ID: %s\n", job.SessionID)
-			}
-		}
+		result += fmt.Sprintf("ID: %d\n%s\n", job.ID, describeJobFields(job))
+		result += describeHold(job)
 		result += "\n"
 	}
 
 	return result, nil
+}
+
+// describeHold names the gate that stops a job running even though it is
+// enabled. It is not one of schedulerJobFields because neither write verb sets
+// it — hold_until is moved by POST /api/jobs/{id}/hold and nothing else.
+func describeHold(job Job) string {
+	if job.HoldUntil == nil || !job.HoldUntil.After(time.Now()) {
+		return ""
+	}
+	return fmt.Sprintf("On hold until: %s\n", job.HoldUntil.Format(time.RFC3339))
 }
 
 func handleCreate(ctx context.Context, baseURL, token string, in schedulerInput) (string, error) {
@@ -339,37 +326,8 @@ func handleGet(ctx context.Context, baseURL, token string, id int64) (string, er
 		return fmt.Sprintf("error parsing response: %s", err), nil
 	}
 
-	result := fmt.Sprintf("Job %d:\nName: %s\nSchedule: %s\nType: %s\nEnabled: %t\n",
-		job.ID, job.Name, job.Schedule, job.Type, job.Enabled)
-
-	if job.Description != "" {
-		result += fmt.Sprintf("Description: %s\n", job.Description)
-	}
-	if job.TimeoutSecs > 0 {
-		result += fmt.Sprintf("Timeout: %ds\n", job.TimeoutSecs)
-	}
-	if job.HoldUntil != nil && job.HoldUntil.After(time.Now()) {
-		result += fmt.Sprintf("On hold until: %s\n", job.HoldUntil.Format(time.RFC3339))
-	}
-
-	if job.Type == "shell" {
-		result += fmt.Sprintf("Command: %s\n", job.Command)
-	} else if job.Type == "agent" {
-		result += fmt.Sprintf("Agent: %s\nPrompt: %s\n", job.Agent, job.Prompt)
-		if job.Model != "" {
-			result += fmt.Sprintf("Model: %s\n", job.Model)
-		}
-		if job.Orchestrator != "" {
-			result += fmt.Sprintf("Orchestrator: %s\n", job.Orchestrator)
-		}
-		if job.SessionID != "" {
-			result += fmt.Sprintf("Session ID: %s\n", job.SessionID)
-		}
-		if job.WorkspaceID != "" {
-			result += fmt.Sprintf("Workspace ID: %s\n", job.WorkspaceID)
-		}
-	}
-
+	result := fmt.Sprintf("Job %d:\n%s\n", job.ID, describeJobFields(job))
+	result += describeHold(job)
 	result += fmt.Sprintf("Created: %s\nUpdated: %s",
 		job.CreatedAt.Format(time.RFC3339), job.UpdatedAt.Format(time.RFC3339))
 
@@ -388,14 +346,29 @@ func handleGet(ctx context.Context, baseURL, token string, id int64) (string, er
 // timeout_seconds and silently drop the rest. Reading the echo instead of
 // trusting the request is correct against either, so this tool never has to
 // know which one it is talking to.
+// The same table also drives the two READ paths, which were a third authoring
+// of the same field list until they were folded onto it. Hand-written, list
+// showed neither the description, the timeout nor the workspace, and get showed
+// the workspace only on agent jobs — so a shell job's workspace binding was
+// invisible on both. Label and ShownWhenZero are what the read paths need from
+// a field, and they sit here so a field added for writing cannot be forgotten
+// for reading.
 type schedulerJobField struct {
 	Name string
+	// Label is how the read paths name this field to the caller.
+	Label string
 	// AcceptedOnCreate records whether POST /api/jobs decodes this field.
 	// Twelve of the thirteen are accepted on both verbs; see the enabled row
 	// for the one that is not.
 	AcceptedOnCreate bool
-	ReadRequested    func(schedulerInput) (any, bool)
-	ReadEchoed       func(Job) any
+	// ShownWhenZero prints the field on the read paths even when it holds its
+	// zero value. Every job has a name, a schedule, a type and an enabled
+	// flag, so a blank one is itself worth seeing. Every other field is
+	// optional, and a line saying it is empty is noise — which is the
+	// convention handleGet already followed for description and timeout.
+	ShownWhenZero bool
+	ReadRequested func(schedulerInput) (any, bool)
+	ReadEchoed    func(Job) any
 }
 
 // schedulerJobFields is the single authoring of the field list both write
@@ -405,18 +378,10 @@ type schedulerJobField struct {
 // and a job created with a description, a timeout or a workspace lost all
 // three on the way out.
 var schedulerJobFields = []schedulerJobField{
-	{"name", true, func(in schedulerInput) (any, bool) { return valueOf(in.Name) }, func(j Job) any { return j.Name }},
-	{"description", true, func(in schedulerInput) (any, bool) { return valueOf(in.Description) }, func(j Job) any { return j.Description }},
-	{"schedule", true, func(in schedulerInput) (any, bool) { return valueOf(in.Schedule) }, func(j Job) any { return j.Schedule }},
-	{"command", true, func(in schedulerInput) (any, bool) { return valueOf(in.Command) }, func(j Job) any { return j.Command }},
-	{"type", true, func(in schedulerInput) (any, bool) { return valueOf(in.Type) }, func(j Job) any { return j.Type }},
-	{"agent", true, func(in schedulerInput) (any, bool) { return valueOf(in.Agent) }, func(j Job) any { return j.Agent }},
-	{"prompt", true, func(in schedulerInput) (any, bool) { return valueOf(in.Prompt) }, func(j Job) any { return j.Prompt }},
-	{"model", true, func(in schedulerInput) (any, bool) { return valueOf(in.Model) }, func(j Job) any { return j.Model }},
-	{"orchestrator", true, func(in schedulerInput) (any, bool) { return valueOf(in.Orchestrator) }, func(j Job) any { return j.Orchestrator }},
-	{"session_id", true, func(in schedulerInput) (any, bool) { return valueOf(in.SessionID) }, func(j Job) any { return j.SessionID }},
-	{"workspace_id", true, func(in schedulerInput) (any, bool) { return valueOf(in.WorkspaceID) }, func(j Job) any { return j.WorkspaceID }},
-	{"timeout_seconds", true, func(in schedulerInput) (any, bool) { return valueOf(in.TimeoutSecs) }, func(j Job) any { return j.TimeoutSecs }},
+	{"name", "Name", true, true, func(in schedulerInput) (any, bool) { return valueOf(in.Name) }, func(j Job) any { return j.Name }},
+	{"description", "Description", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.Description) }, func(j Job) any { return j.Description }},
+	{"schedule", "Schedule", true, true, func(in schedulerInput) (any, bool) { return valueOf(in.Schedule) }, func(j Job) any { return j.Schedule }},
+	{"type", "Type", true, true, func(in schedulerInput) (any, bool) { return valueOf(in.Type) }, func(j Job) any { return j.Type }},
 
 	// Not accepted on create, and sending it anyway is worse than dropping
 	// it. The scheduler's create request struct has no enabled field at all
@@ -426,7 +391,54 @@ var schedulerJobFields = []schedulerJobField{
 	// create path reports the omission rather than sending it — a caller who
 	// asked for a disabled job and was not told otherwise would walk away
 	// believing a live cron job was off.
-	{"enabled", false, func(in schedulerInput) (any, bool) { return valueOf(in.Enabled) }, func(j Job) any { return j.Enabled }},
+	{"enabled", "Enabled", false, true, func(in schedulerInput) (any, bool) { return valueOf(in.Enabled) }, func(j Job) any { return j.Enabled }},
+
+	{"command", "Command", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.Command) }, func(j Job) any { return j.Command }},
+	{"agent", "Agent", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.Agent) }, func(j Job) any { return j.Agent }},
+	{"prompt", "Prompt", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.Prompt) }, func(j Job) any { return j.Prompt }},
+	{"model", "Model", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.Model) }, func(j Job) any { return j.Model }},
+	{"orchestrator", "Orchestrator", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.Orchestrator) }, func(j Job) any { return j.Orchestrator }},
+	{"session_id", "Session ID", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.SessionID) }, func(j Job) any { return j.SessionID }},
+	{"workspace_id", "Workspace ID", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.WorkspaceID) }, func(j Job) any { return j.WorkspaceID }},
+	{"timeout_seconds", "Timeout (seconds)", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.TimeoutSecs) }, func(j Job) any { return j.TimeoutSecs }},
+}
+
+// describeJobFields renders every field of a job that carries a value, one
+// labelled line each, in the order of the table above.
+//
+// It is deliberately NOT gated on the job's type. The scheduler stores every
+// field on every job regardless of type, and the one type gate this tool used
+// to have on a read path is exactly what hid a shell job's workspace binding:
+// handleGet printed WorkspaceID inside its `type == "agent"` branch, so a shell
+// job that had one showed it nowhere. A field a job does not hold is left out
+// by being empty, which needs no branch and cannot single out a field to lose.
+func describeJobFields(job Job) string {
+	var lines []string
+	for _, field := range schedulerJobFields {
+		value := field.ReadEchoed(job)
+		if !field.ShownWhenZero && isZeroFieldValue(value) {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s: %v", field.Label, value))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// isZeroFieldValue reports whether a field holds the value that means the
+// caller never set it. Every field read off the typed Job is a string, an int
+// or a bool; anything else is a field added without a case here, and it is
+// shown rather than silently dropped.
+func isZeroFieldValue(value any) bool {
+	switch typed := value.(type) {
+	case string:
+		return typed == ""
+	case int:
+		return typed == 0
+	case bool:
+		return !typed
+	default:
+		return false
+	}
 }
 
 func valueOf[T any](field *T) (any, bool) {
