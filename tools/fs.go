@@ -262,6 +262,16 @@ func EditFile() Impl {
 	}
 }
 
+// maxWalkedEntries caps how many entries a recursive listing will walk before
+// it gives up. maxListedEntries caps how many of them are shown. They are two
+// different limits and the gap between them is where a listing stops being
+// able to describe itself: past the first, the tool no longer knows the size
+// of the tree, and past the second it is not showing what it does know.
+const (
+	maxWalkedEntries = 1000
+	maxListedEntries = 50
+)
+
 // ListFiles returns a tool that lists directory contents.
 func ListFiles() Impl {
 	type input struct {
@@ -269,8 +279,14 @@ func ListFiles() Impl {
 		Recursive bool   `json:"recursive"`
 	}
 	return Impl{
-		Name:        "list_files",
-		Description: "List files and directories at a path. Use recursive=true for a tree listing (respects .gitignore patterns).",
+		Name: "list_files",
+		// The description said this respected .gitignore. It reads no ignore
+		// file of any kind — the recursive walk skips dot-directories and
+		// nothing else — so a recursive listing of a Node repo walked
+		// node_modules in full and spent the whole cap inside it. Saying what
+		// it skips is the honest version; see the sibling ripgrep tool, whose
+		// identical-sounding claim is true because rg does it natively.
+		Description: "List files and directories at a path. Use recursive=true for a tree listing. A recursive listing skips dot-directories (.git, .venv) and reads no ignore file, so vendored trees like node_modules are walked in full — give a narrower path to stay out of them.",
 		InputSchema: schema.Props([]string{"path"}, map[string]any{
 			"path":      schema.Str("Directory path to list"),
 			"recursive": schema.Bool("List recursively (default: false)"),
@@ -297,16 +313,19 @@ func ListFiles() Impl {
 					}
 					lines = append(lines, name)
 				}
-				return schema.TruncateList(lines, 50), nil
+				// ReadDir returns the whole directory, so this listing is
+				// drawn from a population that was counted in full.
+				return schema.TruncateList(lines, maxListedEntries, schema.CompletePopulation(len(lines))), nil
 			}
 
 			var lines []string
-			const maxEntries = 1000
+			walkStoppedAtCap := false
 			filepath.WalkDir(in.Path, func(path string, d os.DirEntry, err error) error {
 				if err != nil {
 					return nil
 				}
-				if len(lines) >= maxEntries {
+				if len(lines) >= maxWalkedEntries {
+					walkStoppedAtCap = true
 					return filepath.SkipAll
 				}
 				name := d.Name()
@@ -323,10 +342,17 @@ func ListFiles() Impl {
 				lines = append(lines, rel)
 				return nil
 			})
-			if len(lines) >= maxEntries {
-				lines = append(lines, fmt.Sprintf("... (truncated at %d entries)", maxEntries))
+
+			// The cap fact is passed through as population rather than pushed
+			// onto the end of the list. As a list item it was entry number
+			// 1001 of 1001, which put it past the display cut every time, so
+			// the one notice telling the reader the tree was larger than the
+			// walk is exactly the line that never survived to be read.
+			population := schema.CompletePopulation(len(lines))
+			if walkStoppedAtCap {
+				population = schema.PopulationStoppedEarly(len(lines))
 			}
-			return schema.TruncateList(lines, 50), nil
+			return schema.TruncateList(lines, maxListedEntries, population), nil
 		},
 	}
 }

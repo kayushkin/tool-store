@@ -125,22 +125,74 @@ func SummarizeFileWrite(path string, lineCount int) string {
 	return fmt.Sprintf("Successfully wrote %d lines to %s", lineCount, path)
 }
 
-// TruncateList truncates a list of items (e.g., file listings).
-// maxItems: maximum number of items to show before truncating.
-func TruncateList(items []string, maxItems int) string {
-	if len(items) <= maxItems {
+// ListPopulation reports how big the collection behind a rendered list really
+// is. Only the caller that did the enumerating knows this: a caller that
+// stopped early — at a walk cap, a page boundary, a deadline — hands over a
+// slice whose length is a floor and not a total, and nothing downstream can
+// tell that slice apart from a complete one by looking at it.
+//
+// EnumerationComplete is what separates the two. When it is false, Count is
+// the number of items the caller managed to see before it gave up, and the
+// real total is unknown and larger.
+type ListPopulation struct {
+	Count               int
+	EnumerationComplete bool
+}
+
+// CompletePopulation describes a collection the caller enumerated in full.
+func CompletePopulation(count int) ListPopulation {
+	return ListPopulation{Count: count, EnumerationComplete: true}
+}
+
+// PopulationStoppedEarly describes a collection the caller gave up on after
+// seeing countSeen items, so the total is unknown and greater than countSeen.
+func PopulationStoppedEarly(countSeen int) ListPopulation {
+	return ListPopulation{Count: countSeen, EnumerationComplete: false}
+}
+
+// TruncateList renders at most maxItems of a list of items (e.g., file
+// listings), followed by a footer describing everything the reader is not
+// being shown.
+//
+// population must describe the collection items was drawn from. It is a
+// parameter rather than something derived from len(items) because a caller
+// that stopped enumerating early is the only place that still knows it did:
+// by the time the slice arrives here, a walk that halted at its cap and a
+// directory that genuinely holds exactly that many entries are identical. The
+// footer used to say "Total: N items" off len(items) alone, which stated the
+// cap as the size of the tree for every listing large enough to hit it.
+func TruncateList(items []string, maxItems int, population ListPopulation) string {
+	// Everything enumerated, everything shown: the list speaks for itself and
+	// there is nothing to disclose.
+	if len(items) <= maxItems && population.EnumerationComplete {
 		return strings.Join(items, "\n")
 	}
 
-	var result strings.Builder
-	for i := 0; i < maxItems; i++ {
-		result.WriteString(items[i])
-		result.WriteString("\n")
+	shown := items
+	if len(items) > maxItems {
+		shown = items[:maxItems]
 	}
 
-	remaining := len(items) - maxItems
-	result.WriteString(fmt.Sprintf("\n[...%d more items...]\n", remaining))
-	result.WriteString(fmt.Sprintf("(Total: %d items. Use list_files with patterns to filter)\n", len(items)))
+	var result strings.Builder
+	for _, item := range shown {
+		result.WriteString(item)
+		result.WriteString("\n")
+	}
+	result.WriteString("\n")
+
+	if omitted := len(items) - len(shown); omitted > 0 {
+		result.WriteString(fmt.Sprintf("[...%d more items...]\n", omitted))
+	}
+
+	// The remediation named here has to be something the tool actually
+	// offers. list_files takes a path and a recursive flag and no pattern of
+	// any kind, so telling the reader to filter by pattern sends it to an
+	// argument that does not exist.
+	if population.EnumerationComplete {
+		result.WriteString(fmt.Sprintf("(Total: %d items. List a subdirectory to narrow it)\n", population.Count))
+	} else {
+		result.WriteString(fmt.Sprintf("(Listing stopped after %d items and the total is unknown — there are more than this. List a subdirectory to see them)\n", population.Count))
+	}
 
 	return result.String()
 }
