@@ -72,6 +72,38 @@ HELPER_CASES = [
          [("\tif maxBytes <= 0 {\n\t\treturn \"\"\n\t}\n\tif len(s) <= maxBytes {\n\t\treturn s\n\t}\n\t// s[cut] is the first byte past",
            "\tif maxBytes < 1 {\n\t\treturn \"\"\n\t}\n\tif len(s) <= maxBytes {\n\t\treturn s\n\t}\n\t// s[cut] is the first byte past")],
          expected_unnoticed="a behavioural no-op; it must NOT be caught"),
+
+    # ---- boundary VALUES ----
+    #
+    # Everything above this line moves a DIRECTION or deletes a MECHANISM. None
+    # of it moves a number. Measured 2026-08-15: this list scored 17/17 with
+    # both controls behaving while 23 of the 26 adjacent-value moves below went
+    # UNNOTICED — a perfect mutation score and a wholly unpinned set of budgets,
+    # at the same moment. Every move here is by ONE unit; a far move (500 -> 50)
+    # pins a band rather than a value and is frequently a deletion wearing a
+    # number.
+    Case("prefix: the non-positive guard swallows a budget of exactly 1",
+         [("\tif maxBytes <= 0 {\n\t\treturn \"\"\n\t}\n\tif len(s) <= maxBytes {\n\t\treturn s\n\t}\n\t// s[cut] is the first byte past",
+           "\tif maxBytes <= 1 {\n\t\treturn \"\"\n\t}\n\tif len(s) <= maxBytes {\n\t\treturn s\n\t}\n\t// s[cut] is the first byte past")]),
+    Case("suffix: the non-positive guard swallows a budget of exactly 1",
+         [("\tif maxBytes <= 0 {\n\t\treturn \"\"\n\t}\n\tif len(s) <= maxBytes {\n\t\treturn s\n\t}\n\t// s[cut] is the first byte of",
+           "\tif maxBytes <= 1 {\n\t\treturn \"\"\n\t}\n\tif len(s) <= maxBytes {\n\t\treturn s\n\t}\n\t// s[cut] is the first byte of")]),
+    Case("prefix: a string of exactly maxBytes is cut instead of returned whole",
+         [("\tif len(s) <= maxBytes {\n\t\treturn s\n\t}\n\t// s[cut] is the first byte past",
+           "\tif len(s) < maxBytes {\n\t\treturn s\n\t}\n\t// s[cut] is the first byte past")]),
+    Case("suffix: a string of exactly maxBytes is cut instead of returned whole",
+         [("\tif len(s) <= maxBytes {\n\t\treturn s\n\t}\n\t// s[cut] is the first byte of",
+           "\tif len(s) < maxBytes {\n\t\treturn s\n\t}\n\t// s[cut] is the first byte of")],
+         expected_unnoticed="a behavioural no-op, unlike its prefix twin. Falling through with "
+                            "len(s) == maxBytes gives cut = 0, and s[0] is a rune start in any "
+                            "valid UTF-8 string, so the walk does not move and s[0:] is the whole "
+                            "string — the same answer the guard returns. FALSIFY: find an input "
+                            "where the two branches disagree, i.e. a valid UTF-8 string whose "
+                            "first byte is a continuation byte. There is none."),
+    Case("prefix: the cut starts one byte short of the budget",
+         [("\tcut := maxBytes\n", "\tcut := maxBytes - 1\n")]),
+    Case("suffix: the cut starts one byte inside the budget",
+         [("\tcut := len(s) - maxBytes\n", "\tcut := len(s) - maxBytes + 1\n")]),
 ]
 
 # Each call site gets the plain byte cut put back. If the suite stays green for
@@ -80,6 +112,10 @@ CALL_SITES = {
     REPO / "tools" / "web_fetch.go": [
         Case("web_fetch byte-cuts fetched page text again",
              [("schema.TruncateAtRuneBoundary(content, maxChars)", "content[:maxChars]")]),
+        Case("web_fetch's default page budget drifts by one",
+             [("\t\t\t\tmaxChars = 50000", "\t\t\t\tmaxChars = 50001")]),
+        Case("web_fetch treats a requested budget of 1 as unset",
+             [("if maxChars <= 0 {", "if maxChars <= 1 {")]),
     ],
     REPO / "tools" / "fs.go": [
         Case("read_files byte-cuts file content again",
@@ -88,16 +124,43 @@ CALL_SITES = {
         Case("the read banner reports the cap instead of what was kept",
              [("\t\t\tkeptBytes, len(data), totalLines)",
                "\t\t\tmaxWholeFileReadBytes, len(data), totalLines)")]),
+        Case("the whole-file byte cap drifts by one",
+             [("const maxWholeFileReadBytes = 100_000", "const maxWholeFileReadBytes = 100_001")]),
+        Case("a file of exactly the cap is truncated",
+             [("if len(content) > maxWholeFileReadBytes {", "if len(content) >= maxWholeFileReadBytes {")]),
+        Case("the directory-walk entry cap drifts by one",
+             [("const maxEntries = 1000", "const maxEntries = 1001")]),
+        # ⚠️ `schema.TruncateList(lines, 50)` appears TWICE in this file and the
+        # engine replaces the first occurrence only, so the case above reaches
+        # the SHALLOW listing and can say nothing about the recursive one. The
+        # recursive call needs the preceding line to be addressed at all.
+        Case("the shallow listing's list cap drifts by one",
+             [("schema.TruncateList(lines, 50)", "schema.TruncateList(lines, 51)")]),
+        Case("the recursive listing's list cap drifts by one",
+             [("\t\t\t\tlines = append(lines, fmt.Sprintf(\"... (truncated at %d entries)\", maxEntries))\n\t\t\t}\n\t\t\treturn schema.TruncateList(lines, 50), nil",
+               "\t\t\t\tlines = append(lines, fmt.Sprintf(\"... (truncated at %d entries)\", maxEntries))\n\t\t\t}\n\t\t\treturn schema.TruncateList(lines, 51), nil")]),
     ],
     REPO / "tools" / "task_plan.go": [
         Case("the build output written to .task.md is byte-cut again",
              [("schema.TruncateAtRuneBoundary(buildOutput, 500)", "buildOutput[:500]")]),
         Case("the build result output is byte-cut again",
              [("schema.TruncateAtRuneBoundary(output, 2000)", "output[:2000]")]),
+        Case("the build-result threshold drifts by one",
+             [("if len(output) > 2000 {", "if len(output) > 2001 {")]),
+        Case("the build-result cut keeps one byte more than its threshold",
+             [("schema.TruncateAtRuneBoundary(output, 2000)", "schema.TruncateAtRuneBoundary(output, 2001)")]),
+        Case("the build-output threshold drifts by one",
+             [("if len(buildOutput) > 500 {", "if len(buildOutput) > 501 {")]),
+        Case("the build-output cut keeps one byte more than its threshold",
+             [("schema.TruncateAtRuneBoundary(buildOutput, 500)", "schema.TruncateAtRuneBoundary(buildOutput, 501)")]),
     ],
     REPO / "tools" / "scheduler.go": [
         Case("the scheduler tool byte-cuts run output again",
              [("schema.TruncateAtRuneBoundary(output, 500)", "output[:500]")]),
+        Case("the run-output threshold drifts by one",
+             [("if len(output) > 500 {", "if len(output) > 501 {")]),
+        Case("the run-output cut keeps one byte more than its threshold",
+             [("schema.TruncateAtRuneBoundary(output, 500)", "schema.TruncateAtRuneBoundary(output, 501)")]),
     ],
     REPO / "tools" / "shell.go": [
         Case("shell_commands byte-cuts the head again",
@@ -107,6 +170,28 @@ CALL_SITES = {
         Case("the omitted-bytes count is derived from the caps, not what was kept",
              [("omitted := len(s) - len(head) - len(tail)",
                "omitted := len(s) - headChars - tailChars")]),
+        Case("shell: the character ceiling drifts by one",
+             [("\t\tmaxChars     = 50000", "\t\tmaxChars     = 50001")]),
+        Case("shell: the head character budget drifts by one",
+             [("\t\theadChars    = 25000", "\t\theadChars    = 25001")]),
+        Case("shell: the tail character budget drifts by one",
+             [("\t\ttailChars    = 20000", "\t\ttailChars    = 20001")]),
+        Case("shell: the line ceiling drifts by one",
+             [("\t\tmaxLines     = 500", "\t\tmaxLines     = 501")]),
+        Case("shell: the head line budget drifts by one",
+             [("\t\theadLines    = 250", "\t\theadLines    = 251")]),
+        Case("shell: the tail line budget drifts by one",
+             [("\t\ttailLines    = 200", "\t\ttailLines    = 201")]),
+        Case("shell: output of exactly the character ceiling is truncated",
+             [("if len(s) > maxChars {", "if len(s) >= maxChars {")]),
+        Case("shell: output of exactly head+tail is split instead of returned whole",
+             [("if len(s) <= headChars+tailChars {", "if len(s) < headChars+tailChars {")],
+             expected_unnoticed="the branch is unreachable, so no fixture can reach the comparison. "
+                                "It is guarded by len(s) > maxChars, and headChars+tailChars is 45000 "
+                                "against a ceiling of 50000 — any string that gets this far is already "
+                                "over 50000 bytes and cannot be under 45000. FALSIFY: raise "
+                                "headChars+tailChars above maxChars, or lower maxChars below 45000, "
+                                "and this case starts scoring."),
     ],
 }
 
