@@ -212,9 +212,18 @@ func TestWholeFileByteCapIsPinnedToItsExactValue(t *testing.T) {
 	}
 }
 
-// maxEntries caps the recursive walk. The rows it collects are then handed to
-// TruncateList, so the cap is not visible as a row count — it survives only in
-// the notice the walk appends and in the "more items" figure that follows it.
+// maxEntries caps the recursive walk. The walk reports the cap in its
+// stopped-early notice, so the value is assertable directly — this test names
+// it, which is the one thing the notice's own test in fs_list_test.go does not
+// do.
+//
+// Measured rather than assumed, by moving the constant and re-running both:
+// TestTheWalkCapNoticeSurvivesTheDisplayCut walks a 1200-entry fixture, so it
+// catches a cap moved to 10000 (the walk then completes and reports a total)
+// but stays GREEN at 999 and at 1001 — its fixture straddles those, so the
+// walk still stops early and it still finds the strings it looks for. The
+// assertions below fail on all three. Off by one is the move this test exists
+// to catch; the order-of-magnitude move is already covered next door.
 func TestRecursiveWalkEntryCapIsPinnedToItsExactValue(t *testing.T) {
 	const maxEntries = 1000
 
@@ -237,36 +246,47 @@ func TestRecursiveWalkEntryCapIsPinnedToItsExactValue(t *testing.T) {
 		return out
 	}
 
-	// ⚠️ The notice the walk appends — "... (truncated at N entries)" — is NOT
-	// assertable, and that is a defect rather than a gap in this test. It is
-	// appended as the LAST row and TruncateList then keeps only the first 50,
-	// so it is discarded on every path that can produce it: the notice fires
-	// only when there are at least maxEntries rows, which is far more than 50.
-	// Nothing a caller sees says the walk stopped early. Left as found; see the
-	// note filed with this branch.
-	//
-	// So pin the cap through the one figure that does survive — the count of
-	// rows TruncateList was handed, which is the rows the walk collected plus
-	// the dropped notice.
-	if out := list(t, maxEntries+1); strings.Contains(out, "truncated at") {
-		t.Errorf("the walk-cap notice reached the caller; if that is now true, " +
-			"assert its value here instead of the item count below")
-	}
-
-	// Over the cap: the walk stops at maxEntries rows, adds its notice, and
-	// TruncateList reports everything past the first 50 as remaining.
+	// One entry over the cap: the walk gives up and says so, naming the number
+	// of entries it managed to see. That number is the cap.
 	over := list(t, maxEntries+1)
-	if want := fmt.Sprintf("[...%d more items...]", maxEntries+1-50); !strings.Contains(over, want) {
-		t.Errorf("listing does not report %q; the walk collected a different number of rows", want)
+	if want := fmt.Sprintf("Listing stopped after %d items", maxEntries); !strings.Contains(over, want) {
+		t.Errorf("the stopped-early notice does not report %q, so the walk cap is not %d:\n%s",
+			want, maxEntries, tailOf(over))
 	}
 
-	// Under the cap the notice does not fire, so the walk hands over one row
-	// fewer than it does at the cap. That is what separates a moved cap from a
-	// directory that simply had fewer files.
-	under := list(t, maxEntries-1)
-	if want := fmt.Sprintf("[...%d more items...]", maxEntries-1-50); !strings.Contains(under, want) {
-		t.Errorf("listing does not report %q; the walk cap fired below its value", want)
+	// A walk that stopped cannot know the size of the tree, so it must not
+	// print a total. This is the half that makes the count above load-bearing
+	// rather than decorative: a figure labelled "Total" is read as the size of
+	// the directory, and at the cap it is the size of the walk.
+	if strings.Contains(over, "Total:") {
+		t.Errorf("a listing that stopped at its cap still reports a total, which it cannot know:\n%s",
+			tailOf(over))
 	}
+
+	// One entry under the cap the walk completes, so it reports a true total
+	// and never claims it stopped. This is what separates a moved cap from a
+	// directory that simply held fewer files: both show 50 rows, and only the
+	// footer tells them apart.
+	under := list(t, maxEntries-1)
+	if want := fmt.Sprintf("Total: %d items", maxEntries-1); !strings.Contains(under, want) {
+		t.Errorf("a directory of %d entries did not report %q, so the walk cap fired below its value:\n%s",
+			maxEntries-1, want, tailOf(under))
+	}
+	if strings.Contains(under, "Listing stopped") {
+		t.Errorf("a walk that enumerated %d entries in full claims it stopped early:\n%s",
+			maxEntries-1, tailOf(under))
+	}
+}
+
+// tailOf returns the last few lines of a listing, which is where every footer
+// this file asserts on lives. A failure message carrying the whole listing
+// would be a thousand paths long.
+func tailOf(out string) string {
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) > 4 {
+		lines = lines[len(lines)-4:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // The shallow listing hands its rows to schema.TruncateList with a literal cap.
