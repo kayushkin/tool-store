@@ -13,6 +13,15 @@
 *.db-wal
 *.db-shm
 
+# Byte-compiled Python from the sabotage scorers under scripts/. Every scorer
+# run rewrites these, so without the rule the tree is dirty the moment anyone
+# scores anything here — and a dirty tree is the signal an unattended pass reads
+# as "another agent is working in this repo, leave it alone". An accidental
+# artifact would be manufacturing the indicator we use to stay out of each
+# other's way; skill-store committed one and paid exactly that cost.
+__pycache__/
+*.pyc
+
 # Host-local config (machine-specific systemd drop-ins, dev secrets, etc.).
 # Put anything that should never leave this machine under ./.local/
 /.local/
