@@ -108,6 +108,12 @@ func TestRuneBoundaryHelpersHandleTheEdges(t *testing.T) {
 		{"exactly fits", "abc", 3, "abc", "abc"},
 		{"zero budget", "abc", 0, "", ""},
 		{"negative budget", "abc", -1, "", ""},
+		// The give-up guard is `maxBytes <= 0`, and 1 is the adjacent value on
+		// the live side of it. Without this row the guard could be widened to
+		// swallow a budget of one byte with the whole suite green: every other
+		// row here is either at 0 and below, or at 3 and above.
+		{"budget of exactly one byte", "abc", 1, "a", "c"},
+		{"budget of exactly two bytes", "abc", 2, "ab", "bc"},
 		{"empty input", "", 10, "", ""},
 		{"budget narrower than the only rune", fourByteRune, 3, "", ""},
 		{"budget exactly the only rune", fourByteRune, 4, fourByteRune, fourByteRune},
