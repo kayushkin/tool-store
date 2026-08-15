@@ -304,7 +304,7 @@ func runBuild(ctx context.Context, repoRoot string) BuildResult {
 	out, err := proc.CombinedOutput()
 	output := strings.TrimSpace(string(out))
 	if len(output) > 2000 {
-		output = output[:2000] + "\n...(truncated)"
+		output = schema.TruncateAtRuneBoundary(output, 2000) + "\n...(truncated)"
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return BuildResult{Stopped: true, Output: fmt.Sprintf("build stopped: %s", ctxErr)}
@@ -351,7 +351,7 @@ func AddBuildErrorTask(repoRoot string, buildOutput string) error {
 	plan := loadPlan(repoRoot)
 	// Truncate build output to keep it manageable.
 	if len(buildOutput) > 500 {
-		buildOutput = buildOutput[:500] + "..."
+		buildOutput = schema.TruncateAtRuneBoundary(buildOutput, 500) + "..."
 	}
 	plan.Tasks = append(plan.Tasks, TaskItem{
 		Task:        "Fix build error",

@@ -66,7 +66,7 @@ func WebFetch() Impl {
 			}
 
 			if len(content) > maxChars {
-				content = content[:maxChars] + "\n... (truncated)"
+				content = schema.TruncateAtRuneBoundary(content, maxChars) + "\n... (truncated)"
 			}
 
 			return content, nil

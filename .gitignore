@@ -34,3 +34,4 @@ secrets.*
 # re-include through an excluded directory.
 !*.go
 !*.sql
+__pycache__/

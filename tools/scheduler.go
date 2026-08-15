@@ -478,7 +478,7 @@ func handleRuns(ctx context.Context, baseURL, token string, id int64) (string, e
 			// Truncate output if too long
 			output := run.Output
 			if len(output) > 500 {
-				output = output[:500] + "... (truncated)"
+				output = schema.TruncateAtRuneBoundary(output, 500) + "... (truncated)"
 			}
 			result += fmt.Sprintf("Output: %s\n", output)
 		}

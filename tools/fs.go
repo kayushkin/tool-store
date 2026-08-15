@@ -119,9 +119,15 @@ func readSingleFile(path string, offset, limit int) string {
 	// neither, so track each one rather than inferring afterwards.
 	content := string(data)
 	droppedBytes := 0
+	keptBytes := len(content)
 	if len(content) > maxWholeFileReadBytes {
-		droppedBytes = len(content) - maxWholeFileReadBytes
-		content = content[:maxWholeFileReadBytes] + "\n... (truncated)"
+		// The cut lands on a rune boundary, so it can keep up to three bytes
+		// fewer than the cap. Report what was actually kept rather than the
+		// cap, or the banner overstates the read by those bytes.
+		kept := schema.TruncateAtRuneBoundary(content, maxWholeFileReadBytes)
+		keptBytes = len(kept)
+		droppedBytes = len(content) - keptBytes
+		content = kept + "\n... (truncated)"
 	}
 	content, cut := schema.TruncateFileRead(content)
 
@@ -131,7 +137,7 @@ func readSingleFile(path string, offset, limit int) string {
 		// window fired too, has a hole in it as well. Neither end of it can
 		// honestly be given as a line range, so report bytes.
 		content += fmt.Sprintf("\n\n[partial read — %d of %d bytes of a %d-line file. Use offset/limit to read specific sections]",
-			maxWholeFileReadBytes, len(data), totalLines)
+			keptBytes, len(data), totalLines)
 	case cut.Truncated():
 		content += fmt.Sprintf("\n\n[partial read — lines 1-%d and %d-%d of %d. Use offset/limit to read the lines between]",
 			cut.KeptFirst, totalLines-cut.KeptLast+1, totalLines, totalLines)
