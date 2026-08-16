@@ -134,17 +134,26 @@ CALL_SITES = {
              [("const maxWholeFileReadBytes = 100_000", "const maxWholeFileReadBytes = 100_001")]),
         Case("a file of exactly the cap is truncated",
              [("if len(content) > maxWholeFileReadBytes {", "if len(content) >= maxWholeFileReadBytes {")]),
+        # ⚠️ All three cases below were re-aimed by the 240th pass. `cf2a8be`
+        # ("list_files: describe what it actually skips") renamed `maxEntries`
+        # to `maxWalkedEntries`, split the shown-entries cap out as
+        # `maxListedEntries`, and gave both TruncateList calls a population
+        # argument. The three needles stopped matching, and nobody re-ran this
+        # file — see the note this pass filed. The mechanisms are unchanged; only
+        # the text naming them moved.
         Case("the directory-walk entry cap drifts by one",
-             [("const maxEntries = 1000", "const maxEntries = 1001")]),
-        # ⚠️ `schema.TruncateList(lines, 50)` appears TWICE in this file and the
-        # engine replaces the first occurrence only, so the case above reaches
-        # the SHALLOW listing and can say nothing about the recursive one. The
-        # recursive call needs the preceding line to be addressed at all.
+             [("maxWalkedEntries = 1000", "maxWalkedEntries = 1001")]),
+        # The shallow and recursive listings now share ONE named cap, so a case
+        # on the constant would move both at once and could not say which
+        # listing any test reached. These two edit the CALL SITES instead, which
+        # is what the pair was always for — and the reason the old pair needed a
+        # hand-built multi-line needle is gone with the duplicate literal.
         Case("the shallow listing's list cap drifts by one",
-             [("schema.TruncateList(lines, 50)", "schema.TruncateList(lines, 51)")]),
+             [("schema.TruncateList(lines, maxListedEntries, schema.CompletePopulation(len(lines)))",
+               "schema.TruncateList(lines, maxListedEntries+1, schema.CompletePopulation(len(lines)))")]),
         Case("the recursive listing's list cap drifts by one",
-             [("\t\t\t\tlines = append(lines, fmt.Sprintf(\"... (truncated at %d entries)\", maxEntries))\n\t\t\t}\n\t\t\treturn schema.TruncateList(lines, 50), nil",
-               "\t\t\t\tlines = append(lines, fmt.Sprintf(\"... (truncated at %d entries)\", maxEntries))\n\t\t\t}\n\t\t\treturn schema.TruncateList(lines, 51), nil")]),
+             [("schema.TruncateList(lines, maxListedEntries, population)",
+               "schema.TruncateList(lines, maxListedEntries+1, population)")]),
     ],
     REPO / "tools" / "task_plan.go": [
         Case("the build output written to .task.md is byte-cut again",
