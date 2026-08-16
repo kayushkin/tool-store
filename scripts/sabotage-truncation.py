@@ -2,9 +2,15 @@
 """Sabotage cases for the rune-safe truncation work.
 
 The defect this scores is one mechanism spread over six files: a shared pair of
-helpers, and five tools that cut a string down to a byte budget. The engine in
-sabotage.py scores one file at a time, so this drives it once per target and
-adds the scores up.
+helpers, and five tools that cut a string down to a byte budget. This drives the
+engine once per file and adds the scores up.
+
+That used to be forced — the fork of sabotage.py this repo carried scored one
+file at a time. The unioned engine takes several targets in one table, and a
+table per file is still what this file wants: each call site has its own case
+list, the per-file heading is what makes a row's target readable, and a case
+list flattened across six files would have to lengthen every needle that two
+of them happen to share.
 
 Scoring the helper alone would not be enough. The helper's own tests could be
 perfect while a call site still byte-cuts, and that is exactly the state this
@@ -19,7 +25,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from sabotage import Case, REPO, counts_as_coverage, problems, score  # noqa: E402
+from sabotage import Case, REPO, counts_as_coverage, print_score, run_cases  # noqa: E402
 
 PACKAGES = ["./schema/", "./tools/"]
 
@@ -206,8 +212,13 @@ def main():
         print("\n" + "=" * 62)
         print("target: %s" % target.relative_to(REPO))
         print("=" * 62)
-        results = score(target, PACKAGES, cases, GUARD_MARKERS)
-        found += problems(results)
+        # run_cases + print_score, not score(): score() returns an exit status,
+        # and this file needs the rows themselves to add seven tables into one
+        # total. GUARD_MARKERS goes by KEYWORD — the engine's fourth positional
+        # slot held guard_markers on one fork and unreddened on the other, and
+        # binding the wrong one leaves classify_caught blind rather than loud.
+        results = run_cases(target, PACKAGES, cases, guard_markers=GUARD_MARKERS)
+        found += print_score(results)
         for case, verdict, _, _ in results:
             if case.name.startswith("CONTROL"):
                 continue
