@@ -321,6 +321,104 @@ func TestShallowListingItemCapIsPinnedToItsExactValue(t *testing.T) {
 	}
 }
 
+// The recursive listing hands its rows to schema.TruncateList at a SECOND call
+// site, with its own copy of the same literal cap. The shallow test above
+// cannot reach this one: moving the recursive cap by one left the whole
+// package green, scored UNNOTICED by scripts/sabotage-truncation.py.
+//
+// It is the call site where the number matters more. The shallow listing draws
+// on os.ReadDir, which returns the directory whole, so its footer always
+// carries a true total and a reader can subtract to recover the shown count.
+// The recursive listing can stop at maxWalkedEntries, and then its population
+// is PopulationStoppedEarly — a count of what the WALK saw, not of the tree —
+// so the number of rows on screen is not reconstructible from the footer. This
+// test therefore counts the rows rather than reading the footer, and asserts
+// the count in both regimes.
+//
+// ⚠️ The cap is written here as a literal, deliberately, and not as
+// maxListedEntries. The two call sites share that constant, so a case naming it
+// moves both at once and could not say which listing a test reached — which is
+// the whole distinction this test exists to draw.
+func TestRecursiveListingItemCapIsPinnedToItsExactValue(t *testing.T) {
+	const maxItems = 50
+
+	// Every file goes one level down, so the entries this test counts are
+	// reachable ONLY by the recursive walk: run the same fixture shallow and
+	// the listing is one row, the subdirectory. A fixture flat enough for the
+	// shallow path to answer would let this test pass without ever reaching
+	// the call site it is written for.
+	run := func(t *testing.T, entries int) string {
+		t.Helper()
+		dir := t.TempDir()
+		nested := filepath.Join(dir, "nested")
+		if err := os.Mkdir(nested, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// The directory itself is entry number one.
+		for i := 0; i < entries-1; i++ {
+			if err := os.WriteFile(filepath.Join(nested, fmt.Sprintf("f%04d.txt", i)), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		in, err := json.Marshal(map[string]any{"path": dir, "recursive": true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := ListFiles().Run(context.Background(), string(in))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	// Exactly at the cap the listing is shown whole: no marker, no footer.
+	if out := run(t, maxItems); strings.Contains(out, "more items") {
+		t.Errorf("a recursive listing of exactly %d entries was truncated:\n%s", maxItems, tailOf(out))
+	} else if got := shownRows(out); got != maxItems {
+		t.Errorf("a recursive listing of exactly %d entries showed %d rows", maxItems, got)
+	}
+
+	// One over, and exactly one is dropped. Asserting the marker separates a
+	// cap moved UP: at 51 the population is complete and the list fits, so
+	// TruncateList returns the bare rows and no marker is printed at all.
+	over := run(t, maxItems+1)
+	if !strings.Contains(over, "[...1 more items...]") {
+		t.Errorf("a recursive listing of %d entries did not drop exactly one:\n%s", maxItems+1, tailOf(over))
+	}
+	if got := shownRows(over); got != maxItems {
+		t.Errorf("a recursive listing of %d entries showed %d rows, not %d", maxItems+1, got, maxItems)
+	}
+
+	// The regime the footer cannot describe. Past maxWalkedEntries the walk
+	// gives up, so the footer counts what the walk saw and says the total is
+	// unknown; the shown-row count is pinned here by counting, and by nothing
+	// else. It is also what separates this assertion from the walk cap: move
+	// maxWalkedEntries and this number does not budge.
+	stopped := run(t, 1200)
+	if !strings.Contains(stopped, "Listing stopped after") {
+		t.Fatalf("a recursive listing of 1200 entries did not stop early, so the "+
+			"stopped-early regime went untested:\n%s", tailOf(stopped))
+	}
+	if got := shownRows(stopped); got != maxItems {
+		t.Errorf("a recursive listing that stopped at its walk cap showed %d rows, not %d", got, maxItems)
+	}
+}
+
+// shownRows counts the entry rows of a listing. TruncateList writes the rows,
+// then a blank line, then the marker and footer, so the rows are everything
+// before the first blank line. An untruncated listing has no blank line and no
+// footer, and is rows all the way down.
+func shownRows(out string) int {
+	n := 0
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if line == "" {
+			break
+		}
+		n++
+	}
+	return n
+}
+
 // ---- tools/web_fetch.go ----
 
 // The default budget is reached only by a call that names no max_chars, and
