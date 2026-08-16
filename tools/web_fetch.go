@@ -65,13 +65,33 @@ func WebFetch() Impl {
 				content = extractText(content)
 			}
 
-			if len(content) > maxChars {
-				content = schema.TruncateAtRuneBoundary(content, maxChars) + "\n... (truncated)"
+			if truncated := truncateToRuneCount(content, maxChars); len(truncated) < len(content) {
+				content = truncated + "\n... (truncated)"
 			}
 
 			return content, nil
 		},
 	}
+}
+
+// truncateToRuneCount returns the first maxRunes characters of s, or s itself
+// when it is already that short or shorter.
+//
+// It counts characters rather than bytes, which is what the max_chars schema
+// promises. Counting bytes instead under-delivers on any text that is not plain
+// ASCII — a 50000-byte cut of Japanese returns about 16000 characters — and it
+// can also land inside a multi-byte character and split it. Ranging over a
+// string yields the byte offset of each character's first byte, so cutting at
+// one of those offsets is always a whole number of characters.
+func truncateToRuneCount(s string, maxRunes int) string {
+	count := 0
+	for byteOffset := range s {
+		if count >= maxRunes {
+			return s[:byteOffset]
+		}
+		count++
+	}
+	return s
 }
 
 var (
