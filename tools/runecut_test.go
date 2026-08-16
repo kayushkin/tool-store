@@ -120,20 +120,24 @@ func assertShellOutputIntact(t *testing.T, offset int, s string) {
 	if len(out) >= len(s) {
 		t.Fatalf("offset=%d: input was not truncated at all, so the test proves nothing", offset)
 	}
-	// The banner states how many bytes were dropped. It is derived from the
-	// two halves kept, so a cut that moved has to move the figure with it.
+	// The banner states how many CHARACTERS were dropped, and it is derived
+	// from the two halves kept, so a cut that moved has to move the figure with
+	// it. Account in characters, which is the unit the banner names: a byte
+	// identity here would hold only while the code counted bytes, and it would
+	// then be pinning the overstatement the character count exists to fix.
 	var omitted int
 	if _, err := fmt.Sscanf(out[strings.Index(out, "[..."):], "[... %d characters omitted ...]", &omitted); err != nil {
-		t.Fatalf("offset=%d: no omitted-bytes banner in output: %v", offset, err)
+		t.Fatalf("offset=%d: no omitted-characters banner in output: %v", offset, err)
 	}
 	head, tail, found := strings.Cut(out, "\n\n[... ")
 	if !found {
 		t.Fatalf("offset=%d: output has no truncation marker", offset)
 	}
 	_, keptTail, _ := strings.Cut(tail, " ...]\n\n")
-	if got := len(head) + len(keptTail) + omitted; got != len(s) {
-		t.Errorf("offset=%d: head+tail+omitted = %d, but the input was %d bytes",
-			offset, got, len(s))
+	got := utf8.RuneCountInString(head) + utf8.RuneCountInString(keptTail) + omitted
+	if want := utf8.RuneCountInString(s); got != want {
+		t.Errorf("offset=%d: head+tail+omitted = %d characters, but the input was %d characters",
+			offset, got, want)
 	}
 }
 
