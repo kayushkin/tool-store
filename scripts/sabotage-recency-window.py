@@ -36,12 +36,17 @@ PACKAGES = ["./tools/"]
 # the test input reaching the code under test; `go test` exits non-zero for that
 # exactly as it does for a real assertion, so without these the engine counts the
 # test falling over as coverage. See sabotage.classify_caught().
+#
+# The three recency_window_test.go entries are the strategies' own error returns.
+# None of the cases below can make either strategy fail, so none of them should
+# ever fire — but a later case that breaks the call rather than moving the window
+# would otherwise be counted as pinning the window, which is the inflation this
+# split exists to stop.
 GUARD_MARKERS = (
     "input was not truncated at all, so the test proves nothing",
-    "the git strategy returned nothing, so this test would pass with the window anywhere",
-    "this test aims at the git strategy",
-    "this test aims at the mtime strategy",
-    "committing moved",
+    "findRecentlyModifiedGit: ",
+    "findRecentlyModifiedMtime: ",
+    "chtimes ",
 )
 
 TARGET = REPO / "tools" / "recent_files.go"
