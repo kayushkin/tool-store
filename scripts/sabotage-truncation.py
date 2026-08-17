@@ -76,12 +76,15 @@ HELPER_CASES = [
     # ---- boundary VALUES ----
     #
     # Everything above this line moves a DIRECTION or deletes a MECHANISM. None
-    # of it moves a number. Measured 2026-08-15: this list scored 17/17 with
-    # both controls behaving while 23 of the 26 adjacent-value moves below went
+    # of it moves a number. Measured 2026-08-15: the 17 direction/mechanism cases
+    # scored 17/17 with both controls behaving while 23 adjacent-value moves went
     # UNNOTICED — a perfect mutation score and a wholly unpinned set of budgets,
-    # at the same moment. Every move here is by ONE unit; a far move (500 -> 50)
-    # pins a band rather than a value and is frequently a deletion wearing a
-    # number.
+    # at the same moment. That run wrote "23 of 26"; a census on 2026-08-17 finds
+    # 27 value cases, 6 here and 21 in CALL_SITES (46 cases total: 17 + 27 + 2
+    # controls), so the denominator was one short of its own list even then, and
+    # the 23 is the only half of it that was measured. Every move here is by ONE
+    # unit; a far move (500 -> 50) pins a band rather than a value and is
+    # frequently a deletion wearing a number.
     Case("prefix: the non-positive guard swallows a budget of exactly 1",
          [("\tif maxBytes <= 0 {\n\t\treturn \"\"\n\t}\n\tif len(s) <= maxBytes {\n\t\treturn s\n\t}\n\t// s[cut] is the first byte past",
            "\tif maxBytes <= 1 {\n\t\treturn \"\"\n\t}\n\tif len(s) <= maxBytes {\n\t\treturn s\n\t}\n\t// s[cut] is the first byte past")]),
