@@ -72,10 +72,15 @@ CASES = [
     #
     # Dropping `--since` entirely is the crude version of the two moves above and
     # asks a different question: whether anything notices the window vanishing,
-    # as opposed to moving. Written as an argument swap rather than a deletion so
-    # no identifier is orphaned.
+    # as opposed to moving.
+    #
+    # Both lines that derive the argument are replaced by the one literal. Swapping
+    # only the call site orphans `sinceArg`, and an orphaned identifier is a Go
+    # compile error, which scores as `compile error` rather than as a result —
+    # measured, that is exactly what this row did on its first run.
     Case("git: the window is never passed to git log",
-         [('"--since", sinceArg', '"--since", "1970-01-01 00:00:00"')]),
+         [('\tsinceTime := time.Now().Add(-since)\n\tsinceArg := sinceTime.Format("2006-01-02 15:04:05")',
+           '\tsinceArg := "1970-01-01 00:00:00"')]),
 
     Case("CONTROL known-positive: the mtime walk keeps nothing",
          [("\t\tif info.ModTime().After(cutoff) {",
