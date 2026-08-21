@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +43,74 @@ func runBrowser(t *testing.T, arguments string) string {
 		t.Fatalf("the browser tool returned a transport error: %v", err)
 	}
 	return output
+}
+
+// ---- the failures that are not a status ----
+//
+// pinchtabRequestExpectingSuccess has five producers of a nil body and only two
+// of them were pinned: the non-2xx above, and the transport error the
+// cancellation case at the foot of this file carries. Measured 2026-08-21 on
+// this branch with one mutation per producer: the marshal arm, the request-build
+// arm and the body-read arm were all SILENT, and an inverted-condition control
+// showed all three sites execute, so they are live branches nothing asserts
+// rather than dead code.
+//
+// Two of the three are reachable without touching the package: the request-build
+// arm through PINCHTAB_URL, which is configuration, and the body-read arm through
+// a response that stops early, which is any dropped connection. The marshal arm
+// is not — every caller in this file hands it a map of strings — so it is left
+// stated rather than papered over with a test that cannot fail for the right
+// reason.
+//
+// Both tests below assert twice: the cause, which only one arm can produce, and
+// that the failure is NOT a pinchtabStatusError. The second half is what stops a
+// configuration mistake or a dropped connection from reading to whoever is
+// looking as something PinchTab said.
+
+// A PINCHTAB_URL that will not parse is the operator's mistake, and it must not
+// arrive looking like an answer from a browser that was never contacted.
+func TestAPinchtabURLThatWillNotParseIsReportedAsTheOperatorsMistake(t *testing.T) {
+	t.Setenv("PINCHTAB_URL", "http://localhost:9867/\x7f")
+	t.Setenv("PINCHTAB_TOKEN", "")
+
+	_, err := pinchtabRequestExpectingSuccess(context.Background(), "GET", "/text", nil)
+	if err == nil {
+		t.Fatal("a URL holding a control character was accepted and requested")
+	}
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		t.Errorf("only the request-build arm raises a *url.Error, and the cause must survive to say so; got %v", err)
+	}
+	var statusErr *pinchtabStatusError
+	if errors.As(err, &statusErr) {
+		t.Errorf("a URL that never reached PinchTab was reported as a status from it: %v", err)
+	}
+}
+
+// A response that stops short of its own Content-Length is a dropped
+// connection. Returning the bytes that did arrive would hand the model half a
+// snapshot as if it were the whole one.
+func TestABodyThatStopsEarlyIsAnErrorRatherThanAShortResult(t *testing.T) {
+	pinchtabServing(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "64")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("half a snapshot"))
+	})
+
+	data, err := pinchtabRequestExpectingSuccess(context.Background(), "GET", "/text", nil)
+	if err == nil {
+		t.Fatalf("a truncated body was returned as the result: %q", data)
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("only the body-read arm raises io.ErrUnexpectedEOF, and the cause must survive to say so; got %v", err)
+	}
+	var statusErr *pinchtabStatusError
+	if errors.As(err, &statusErr) {
+		t.Errorf("a connection that dropped mid-body was reported as a status from PinchTab: %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("the partial body came back alongside the error: %q", data)
+	}
 }
 
 // The starkest case: a navigate PinchTab rejected used to read to the model as a
