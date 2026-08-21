@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,11 +188,30 @@ func TestAMissingPathIsAnErrorRatherThanAnEmptyMap(t *testing.T) {
 	}
 }
 
+// Run has two failure producers — the request that will not parse and the map
+// that will not build — and only the second says what it was doing. "it
+// returned an error" cannot tell them apart, so this test names the producer
+// twice over: the cause is a JSON syntax problem, which the build arm cannot
+// raise, and the message is not the build's.
+//
+// Measured 2026-08-21 on this branch: rewriting the arm to
+// fmt.Errorf("failed to build repo map: %w", err) sends a caller with a typo in
+// their request off to look at the tree instead, and leaves errors.As
+// satisfied — the syntax error survives the wrap. Only the second assertion
+// reddens on it.
 func TestUnparseableInputIsReportedRatherThanTreatedAsDefaults(t *testing.T) {
 	root := writeTree(t, map[string]string{"a.go": "package a\n\nfunc A() {}\n"})
 
-	if _, err := RepoMap(root, nil).Run(context.Background(), "{not json"); err == nil {
+	_, err := RepoMap(root, nil).Run(context.Background(), "{not json")
+	if err == nil {
 		t.Fatal("a malformed input was accepted as an empty request")
+	}
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Errorf("a malformed request must be reported as one, and only the unmarshal arm raises a *json.SyntaxError; got %v", err)
+	}
+	if strings.Contains(err.Error(), "failed to build repo map") {
+		t.Errorf("a request that will not parse was reported as the map build's failure: %v", err)
 	}
 }
 
