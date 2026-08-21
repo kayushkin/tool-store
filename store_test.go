@@ -3,6 +3,7 @@ package toolstore
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -124,30 +125,49 @@ func TestUpsertLocal(t *testing.T) {
 	}
 }
 
+// The kind check is validate's, not the database's. schema.sql also carries
+// CHECK (kind IN ('mcp', 'cli', 'local')), so a test that asserts only "the
+// upsert failed" stays green with validate's own check deleted — the driver
+// answers instead, several layers later and with a constraint error the caller
+// cannot act on. Naming validate's wording is what tells the two apart.
 func TestValidationRejectsBadKind(t *testing.T) {
 	s := openTest(t)
 	_, err := s.UpsertTool(&Tool{Name: "x", Kind: "bogus"})
 	if err == nil {
 		t.Fatal("expected validation error for unknown kind")
 	}
+	want := `kind "bogus" must be one of mcp, cli, local`
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("want validate's own refusal naming %q, got %q", want, err.Error())
+	}
 }
 
+// Each row of this table is a separate producer of validate's error. Asserting
+// only that an error came back cannot tell them apart, so each case names the
+// field its own refusal is about.
 func TestValidationRejectsMissingFields(t *testing.T) {
 	s := openTest(t)
 	cases := []struct {
 		desc string
 		t    *Tool
+		want string
 	}{
-		{"mcp without spec", &Tool{Name: "a", Kind: KindMCP}},
-		{"mcp stdio without command", &Tool{Name: "b", Kind: KindMCP, MCP: &MCPSpec{Transport: "stdio"}}},
-		{"mcp http without url", &Tool{Name: "c", Kind: KindMCP, MCP: &MCPSpec{Transport: "http"}}},
-		{"cli without command", &Tool{Name: "d", Kind: KindCLI, CLI: &CLISpec{}}},
-		{"local without symbol", &Tool{Name: "e", Kind: KindLocal, Local: &LocalSpec{}}},
-		{"missing name", &Tool{Kind: KindLocal, Local: &LocalSpec{Symbol: "x"}}},
+		{"mcp without spec", &Tool{Name: "a", Kind: KindMCP}, "mcp spec is required for kind=mcp"},
+		{"mcp stdio without command", &Tool{Name: "b", Kind: KindMCP, MCP: &MCPSpec{Transport: "stdio"}}, "mcp.command is required for stdio transport"},
+		{"mcp http without url", &Tool{Name: "c", Kind: KindMCP, MCP: &MCPSpec{Transport: "http"}}, "mcp.url is required for http transport"},
+		{"mcp with an unknown transport", &Tool{Name: "f", Kind: KindMCP, MCP: &MCPSpec{Transport: "grpc", Command: "x"}}, `mcp.transport "grpc" must be stdio, http, or sse`},
+		{"cli without command", &Tool{Name: "d", Kind: KindCLI, CLI: &CLISpec{}}, "cli.command is required for kind=cli"},
+		{"local without symbol", &Tool{Name: "e", Kind: KindLocal, Local: &LocalSpec{}}, "local.symbol is required for kind=local"},
+		{"missing name", &Tool{Kind: KindLocal, Local: &LocalSpec{Symbol: "x"}}, "tool: name is required"},
 	}
 	for _, c := range cases {
-		if _, err := s.UpsertTool(c.t); err == nil {
+		_, err := s.UpsertTool(c.t)
+		if err == nil {
 			t.Errorf("%s: expected validation error", c.desc)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: want an error naming %q, got %q", c.desc, c.want, err.Error())
 		}
 	}
 }
