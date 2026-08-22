@@ -71,6 +71,11 @@ func TestRunCLIEcho(t *testing.T) {
 	}
 }
 
+// TestRunCLIMissingField covers an ArgsTemplate placeholder with no matching
+// input key. The error is the caller's only account of WHICH placeholder went
+// unresolved, so this pins the tool name and the field name in it — asserting
+// only that some error came back leaves runCLI free to return any of its other
+// four.
 func TestRunCLIMissingField(t *testing.T) {
 	tool := &Tool{
 		Name: "echo",
@@ -84,8 +89,17 @@ func TestRunCLIMissingField(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing field")
 	}
+	const want = `tool "echo": missing input field "nope" for placeholder {{nope}}`
+	if err.Error() != want {
+		t.Fatalf("substitution error:\n got %q\nwant %q", err.Error(), want)
+	}
 }
 
+// TestRunCLINonZeroExit covers a command that fails with nothing on stderr.
+// runCLI returns the exit error unwrapped in that arm, so the assertion is
+// EQUALITY and not `strings.Contains`: every wrapping of the exit error still
+// contains "exit status 1", and a contains-check would hold just as well if
+// this arm started folding a prefix in front of it.
 func TestRunCLINonZeroExit(t *testing.T) {
 	tool := &Tool{
 		Name: "false",
@@ -98,25 +112,48 @@ func TestRunCLINonZeroExit(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for nonzero exit")
 	}
+	if err.Error() != "exit status 1" {
+		t.Fatalf("silent-stderr arm should return the exit error unwrapped, got %q", err.Error())
+	}
 }
 
 // TestRunCLIMissingSpec covers the guard for a tool whose CLI spec is nil or
-// has an empty command — runCLI must reject it rather than exec nothing.
+// has an empty command — runCLI must reject it rather than exec nothing. Both
+// arms pin the message, which names the offending tool: that name is what tells
+// an operator staring at a provisioning failure which of their tools is the
+// misconfigured one.
 func TestRunCLIMissingSpec(t *testing.T) {
-	if _, err := runCLI(context.Background(), &Tool{Name: "nospec", Kind: KindCLI}, `{}`); err == nil {
+	_, err := runCLI(context.Background(), &Tool{Name: "nospec", Kind: KindCLI}, `{}`)
+	if err == nil {
 		t.Fatal("expected error when CLI spec is nil")
 	}
-	if _, err := runCLI(context.Background(), &Tool{Name: "nocmd", Kind: KindCLI, CLI: &CLISpec{}}, `{}`); err == nil {
+	if err.Error() != `cli spec missing for tool "nospec"` {
+		t.Fatalf("nil-spec arm: got %q", err.Error())
+	}
+	_, err = runCLI(context.Background(), &Tool{Name: "nocmd", Kind: KindCLI, CLI: &CLISpec{}}, `{}`)
+	if err == nil {
 		t.Fatal("expected error when CLI command is empty")
+	}
+	if err.Error() != `cli spec missing for tool "nocmd"` {
+		t.Fatalf("empty-command arm: got %q", err.Error())
 	}
 }
 
 // TestRunCLIInvalidInputJSON covers rejection of malformed input JSON before
-// any command runs.
+// any command runs. It pins the prefix AND that the decoder's own complaint is
+// still wrapped inside it — the prefix alone says the input was bad, and the
+// wrapped half is the only thing that says where.
 func TestRunCLIInvalidInputJSON(t *testing.T) {
 	tool := &Tool{Name: "echo", Kind: KindCLI, CLI: &CLISpec{Command: "echo"}}
-	if _, err := runCLI(context.Background(), tool, `{not json`); err == nil {
+	_, err := runCLI(context.Background(), tool, `{not json`)
+	if err == nil {
 		t.Fatal("expected error for invalid input json")
+	}
+	if !strings.HasPrefix(err.Error(), "invalid input json: ") {
+		t.Fatalf("json error lost its prefix: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "invalid character 'n'") {
+		t.Fatalf("json error dropped the decoder's account of what was wrong: %q", err.Error())
 	}
 }
 
