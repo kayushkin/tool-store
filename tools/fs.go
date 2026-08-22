@@ -151,13 +151,17 @@ func readSingleFile(path string, offset, limit int) string {
 
 // WriteFile returns a tool that creates or overwrites files.
 func WriteFile() Impl {
+	// Content is a pointer so an absent "content" key is distinguishable from an
+	// explicit empty one. Discriminating this union on the zero value read
+	// {"path":"x"} as a request to write empty bytes, so a schema-valid call
+	// truncated an existing file and reported "wrote 0 bytes" as success.
 	type fileEntry struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
+		Path    string  `json:"path"`
+		Content *string `json:"content"`
 	}
 	type input struct {
 		Path    string      `json:"path"`
-		Content string      `json:"content"`
+		Content *string     `json:"content"`
 		Files   []fileEntry `json:"files"`
 	}
 	return Impl{
@@ -185,15 +189,22 @@ func WriteFile() Impl {
 
 			var results []string
 			for _, f := range files {
+				// An entry that never sent "content" is an incomplete call, not a
+				// request for an empty file. Refuse it before touching the path;
+				// "content":"" is the way to ask for a truncation on purpose.
+				if f.Content == nil {
+					results = append(results, fmt.Sprintf("error: %s: no \"content\" key, refusing to write (send \"content\":\"\" to truncate deliberately)", f.Path))
+					continue
+				}
 				if err := os.MkdirAll(filepath.Dir(f.Path), 0755); err != nil {
 					results = append(results, fmt.Sprintf("error creating directory for %s: %s", f.Path, err))
 					continue
 				}
-				if err := os.WriteFile(f.Path, []byte(f.Content), 0644); err != nil {
+				if err := os.WriteFile(f.Path, []byte(*f.Content), 0644); err != nil {
 					results = append(results, fmt.Sprintf("error writing %s: %s", f.Path, err))
 					continue
 				}
-				results = append(results, fmt.Sprintf("wrote %d bytes to %s", len(f.Content), f.Path))
+				results = append(results, fmt.Sprintf("wrote %d bytes to %s", len(*f.Content), f.Path))
 			}
 			return strings.Join(results, "\n"), nil
 		},
