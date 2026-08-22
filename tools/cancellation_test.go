@@ -128,8 +128,16 @@ func TestRecentFilesGitStopsWhenTheCallerCancels(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled: the command must not run to completion
 
-	if _, err := findRecentlyModifiedGit(ctx, repository, time.Hour); err == nil {
-		t.Error("git log ran to completion against a cancelled context")
+	// Asserting only that an error came back would leave the cancellation
+	// indistinguishable from "this is not a git repository", and those two go
+	// opposite ways one level up: findRecentlyModified serves the second with a
+	// full mtime walk and must not serve the first with anything.
+	_, err := findRecentlyModifiedGit(ctx, repository, time.Hour)
+	if err == nil {
+		t.Fatal("git log ran to completion against a cancelled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("want the cancellation reported as context.Canceled, got %v", err)
 	}
 }
 

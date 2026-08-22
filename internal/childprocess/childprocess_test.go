@@ -203,3 +203,45 @@ func TestCancelLetsTheCommandRunItsCleanupHandler(t *testing.T) {
 		t.Fatalf("the command was never given the chance to clean up: %v", err)
 	}
 }
+
+// Run returns the error from starting the command and the error from waiting
+// for it through the same single value, and the two mean opposite things: a
+// command that never launched has produced no output and no verdict, while a
+// command that launched and exited badly has produced both. A caller that can
+// only see "it failed" cannot tell a bad command line from a command whose own
+// answer was failure.
+//
+// The wait side was already pinned by the exit-status and ErrWaitDelay
+// assertions above. The start side was not: replacing Start's error with any
+// other well-formed error left every test passing.
+func TestRunTellsACommandThatNeverLaunchedFromOneThatRanAndFailed(t *testing.T) {
+	neverLaunched := NewCommand(context.Background(), filepath.Join(t.TempDir(), "no-such-program")).Run()
+	if !errors.Is(neverLaunched, os.ErrNotExist) {
+		t.Errorf("a missing program: want a not-exist error, got %v", neverLaunched)
+	}
+
+	ranAndFailed := NewCommand(context.Background(), "bash", "-c", "exit 3").Run()
+	var exitErr *exec.ExitError
+	if !errors.As(ranAndFailed, &exitErr) {
+		t.Errorf("a command that ran and exited 3: want an *exec.ExitError, got %v", ranAndFailed)
+	}
+	if errors.Is(ranAndFailed, os.ErrNotExist) {
+		t.Error("a command that ran and exited 3 was reported as a missing program")
+	}
+}
+
+// A context already cancelled when Run is called stops the command before it
+// is started, so the failure comes out of Start rather than out of Wait. It
+// still has to say that it was cancelled: findRecentlyModified reads exactly
+// this distinction to decide whether "git could not answer" should fall back
+// to a full tree walk, and a cancellation reported as an ordinary failure
+// would start the expensive walk the caller just asked to stop.
+func TestRunReportsACancellationThatArrivedBeforeTheCommandStarted(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := NewCommand(ctx, "bash", "-c", "exit 0").Run()
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("want context.Canceled, got %v", err)
+	}
+}
