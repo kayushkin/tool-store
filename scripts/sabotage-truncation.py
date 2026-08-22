@@ -2,9 +2,15 @@
 """Sabotage cases for the rune-safe truncation work.
 
 The defect this scores is one mechanism spread over six files: a shared pair of
-helpers, and five tools that cut a string down to a byte budget. The engine in
-sabotage.py scores one file at a time, so this drives it once per target and
-adds the scores up.
+helpers, and five tools that cut a string down to a byte budget. This drives the
+engine once per file and adds the scores up.
+
+That used to be forced — the fork of sabotage.py this repo carried scored one
+file at a time. The unioned engine takes several targets in one table, and a
+table per file is still what this file wants: each call site has its own case
+list, the per-file heading is what makes a row's target readable, and a case
+list flattened across six files would have to lengthen every needle that two
+of them happen to share.
 
 Scoring the helper alone would not be enough. The helper's own tests could be
 perfect while a call site still byte-cuts, and that is exactly the state this
@@ -19,7 +25,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from sabotage import Case, REPO, counts_as_coverage, problems, score  # noqa: E402
+from sabotage import Case, REPO, counts_as_coverage, print_score, run_cases  # noqa: E402
 
 PACKAGES = ["./schema/", "./tools/"]
 
@@ -128,17 +134,26 @@ CALL_SITES = {
              [("const maxWholeFileReadBytes = 100_000", "const maxWholeFileReadBytes = 100_001")]),
         Case("a file of exactly the cap is truncated",
              [("if len(content) > maxWholeFileReadBytes {", "if len(content) >= maxWholeFileReadBytes {")]),
+        # ⚠️ All three cases below were re-aimed by the 240th pass. `cf2a8be`
+        # ("list_files: describe what it actually skips") renamed `maxEntries`
+        # to `maxWalkedEntries`, split the shown-entries cap out as
+        # `maxListedEntries`, and gave both TruncateList calls a population
+        # argument. The three needles stopped matching, and nobody re-ran this
+        # file — see the note this pass filed. The mechanisms are unchanged; only
+        # the text naming them moved.
         Case("the directory-walk entry cap drifts by one",
-             [("const maxEntries = 1000", "const maxEntries = 1001")]),
-        # ⚠️ `schema.TruncateList(lines, 50)` appears TWICE in this file and the
-        # engine replaces the first occurrence only, so the case above reaches
-        # the SHALLOW listing and can say nothing about the recursive one. The
-        # recursive call needs the preceding line to be addressed at all.
+             [("maxWalkedEntries = 1000", "maxWalkedEntries = 1001")]),
+        # The shallow and recursive listings now share ONE named cap, so a case
+        # on the constant would move both at once and could not say which
+        # listing any test reached. These two edit the CALL SITES instead, which
+        # is what the pair was always for — and the reason the old pair needed a
+        # hand-built multi-line needle is gone with the duplicate literal.
         Case("the shallow listing's list cap drifts by one",
-             [("schema.TruncateList(lines, 50)", "schema.TruncateList(lines, 51)")]),
+             [("schema.TruncateList(lines, maxListedEntries, schema.CompletePopulation(len(lines)))",
+               "schema.TruncateList(lines, maxListedEntries+1, schema.CompletePopulation(len(lines)))")]),
         Case("the recursive listing's list cap drifts by one",
-             [("\t\t\t\tlines = append(lines, fmt.Sprintf(\"... (truncated at %d entries)\", maxEntries))\n\t\t\t}\n\t\t\treturn schema.TruncateList(lines, 50), nil",
-               "\t\t\t\tlines = append(lines, fmt.Sprintf(\"... (truncated at %d entries)\", maxEntries))\n\t\t\t}\n\t\t\treturn schema.TruncateList(lines, 51), nil")]),
+             [("schema.TruncateList(lines, maxListedEntries, population)",
+               "schema.TruncateList(lines, maxListedEntries+1, population)")]),
     ],
     REPO / "tools" / "task_plan.go": [
         Case("the build output written to .task.md is byte-cut again",
@@ -206,8 +221,13 @@ def main():
         print("\n" + "=" * 62)
         print("target: %s" % target.relative_to(REPO))
         print("=" * 62)
-        results = score(target, PACKAGES, cases, GUARD_MARKERS)
-        found += problems(results)
+        # run_cases + print_score, not score(): score() returns an exit status,
+        # and this file needs the rows themselves to add seven tables into one
+        # total. GUARD_MARKERS goes by KEYWORD — the engine's fourth positional
+        # slot held guard_markers on one fork and unreddened on the other, and
+        # binding the wrong one leaves classify_caught blind rather than loud.
+        results = run_cases(target, PACKAGES, cases, guard_markers=GUARD_MARKERS)
+        found += print_score(results)
         for case, verdict, _, _ in results:
             if case.name.startswith("CONTROL"):
                 continue
