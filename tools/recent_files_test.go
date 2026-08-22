@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -223,9 +224,29 @@ func TestAnUnreadableRootIsReportedRatherThanReadAsQuiet(t *testing.T) {
 	}
 }
 
+// Run has three failure producers — the request that will not parse, the
+// window string that will not parse, and the walk that fails — and only two of
+// them wrap what they say. "it returned an error" cannot tell them apart, so
+// this test names the producer twice over: the cause is a JSON syntax problem,
+// which no other arm can raise, and the message is not the walk's.
+//
+// Both halves are load-bearing and neither subsumes the other. Measured
+// 2026-08-21 on this branch: rewriting the arm to
+// fmt.Errorf("failed to find recent files: %w", err) — a malformed request
+// reported as a failed walk, which sends whoever reads it to the filesystem —
+// leaves errors.As satisfied, because the syntax error survives the wrap. Only
+// the second assertion reddens on it.
 func TestUnparseableInputIsReportedRatherThanDefaulted(t *testing.T) {
-	if _, err := RecentFiles(t.TempDir()).Run(context.Background(), "{not json"); err == nil {
+	_, err := RecentFiles(t.TempDir()).Run(context.Background(), "{not json")
+	if err == nil {
 		t.Fatal("a malformed input was accepted as an empty request")
+	}
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Errorf("a malformed request must be reported as one, and only the unmarshal arm raises a *json.SyntaxError; got %v", err)
+	}
+	if strings.Contains(err.Error(), "failed to find recent files") {
+		t.Errorf("a request that will not parse was reported as the walk's failure: %v", err)
 	}
 }
 
