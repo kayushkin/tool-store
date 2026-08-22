@@ -28,7 +28,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from sabotage import Case, REPO, counts_as_coverage, problems, score  # noqa: E402
+from sabotage import (Case, REPO, counts_as_coverage, print_score,  # noqa: E402
+                      run_cases)
 
 PACKAGES = ["./tools/"]
 
@@ -104,8 +105,15 @@ CASES = [
 
 def main():
     print("target: %s" % TARGET.relative_to(REPO))
-    results = score(TARGET, PACKAGES, CASES, GUARD_MARKERS)
-    found = problems(results)
+    # run_cases + print_score, not score(): the unioned engine's score() returns
+    # an exit status where the fork this file was written against returned the
+    # rows, and the rows are what the total below counts. GUARD_MARKERS goes by
+    # KEYWORD — the two forks each ended score() in a fourth positional
+    # parameter and they were different ones (guard_markers here, unreddened
+    # there), so the union made both keyword-only and a positional call is now a
+    # TypeError rather than a silent mis-binding.
+    results = run_cases(TARGET, PACKAGES, CASES, guard_markers=GUARD_MARKERS)
+    found = print_score(results)
 
     caught = 0
     real = 0
