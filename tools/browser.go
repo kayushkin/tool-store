@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -25,7 +26,32 @@ func pinchtabToken() string {
 	return os.Getenv("PINCHTAB_TOKEN")
 }
 
-func pinchtabDo(method, path string, body any) ([]byte, error) {
+// pinchtabStatusError reports a PinchTab response whose status was not 2xx. It
+// carries the status separately from the body so a caller — or a test — can ask
+// what PinchTab actually said rather than matching on a formatted string.
+type pinchtabStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *pinchtabStatusError) Error() string {
+	return fmt.Sprintf("pinchtab returned %d: %s", e.StatusCode, e.Body)
+}
+
+// pinchtabRequestExpectingSuccess sends one request to PinchTab and returns the
+// response body only when the status is 2xx. A non-2xx is an error, never a
+// body.
+//
+// It used to be pinchtabDo, which never read resp.StatusCode: a 404, a 401 or a
+// 500 came back with err == nil and every action handed PinchTab's error body to
+// the model as the result of the action. `navigate` to a URL PinchTab rejected
+// read as a navigation that worked, and `tabs` decoded an error body to zero
+// instances and reported "no instances running" — which is exactly what a
+// browser with no tabs open looks like.
+//
+// It also used http.NewRequest, so no caller's context reached the request and
+// cancelling a browser tool call cancelled nothing.
+func pinchtabRequestExpectingSuccess(ctx context.Context, method, path string, body any) ([]byte, error) {
 	base := pinchtabURL()
 	var bodyReader io.Reader
 	if body != nil {
@@ -33,9 +59,9 @@ func pinchtabDo(method, path string, body any) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		bodyReader = strings.NewReader(string(b))
+		bodyReader = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, base+path, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, base+path, bodyReader)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +76,14 @@ func pinchtabDo(method, path string, body any) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, &pinchtabStatusError{StatusCode: resp.StatusCode, Body: string(data)}
+	}
+	return data, nil
 }
 
 // Browser returns a tool that controls a browser via PinchTab's HTTP API.
@@ -93,7 +126,7 @@ func Browser() Impl {
 				if in.URL == "" {
 					return "error: url is required for navigate", nil
 				}
-				data, err := pinchtabDo("POST", "/navigate", map[string]string{"url": in.URL})
+				data, err := pinchtabRequestExpectingSuccess(ctx, "POST", "/navigate", map[string]string{"url": in.URL})
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
@@ -104,7 +137,7 @@ func Browser() Impl {
 				if in.Filter != "" {
 					path += "?filter=" + in.Filter
 				}
-				data, err := pinchtabDo("GET", path, nil)
+				data, err := pinchtabRequestExpectingSuccess(ctx, "GET", path, nil)
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
@@ -114,7 +147,7 @@ func Browser() Impl {
 				if in.Ref == "" {
 					return "error: ref is required for click", nil
 				}
-				data, err := pinchtabDo("POST", "/action", map[string]string{"kind": "click", "ref": in.Ref})
+				data, err := pinchtabRequestExpectingSuccess(ctx, "POST", "/action", map[string]string{"kind": "click", "ref": in.Ref})
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
@@ -124,28 +157,28 @@ func Browser() Impl {
 				if in.Ref == "" {
 					return "error: ref is required for type", nil
 				}
-				data, err := pinchtabDo("POST", "/action", map[string]string{"kind": "type", "ref": in.Ref, "text": in.Text})
+				data, err := pinchtabRequestExpectingSuccess(ctx, "POST", "/action", map[string]string{"kind": "type", "ref": in.Ref, "text": in.Text})
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
 				return string(data), nil
 
 			case "text":
-				data, err := pinchtabDo("GET", "/text", nil)
+				data, err := pinchtabRequestExpectingSuccess(ctx, "GET", "/text", nil)
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
 				return string(data), nil
 
 			case "screenshot":
-				data, err := pinchtabDo("GET", "/screenshot", nil)
+				data, err := pinchtabRequestExpectingSuccess(ctx, "GET", "/screenshot", nil)
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
 				return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(data), nil
 
 			case "tabs":
-				instData, err := pinchtabDo("GET", "/instances", nil)
+				instData, err := pinchtabRequestExpectingSuccess(ctx, "GET", "/instances", nil)
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
@@ -158,7 +191,7 @@ func Browser() Impl {
 				if len(instances) == 0 {
 					return "no instances running", nil
 				}
-				data, err := pinchtabDo("GET", "/instances/"+instances[0].ID+"/tabs", nil)
+				data, err := pinchtabRequestExpectingSuccess(ctx, "GET", "/instances/"+instances[0].ID+"/tabs", nil)
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
@@ -168,7 +201,7 @@ func Browser() Impl {
 				if in.TabID == "" {
 					return "error: tab_id is required for close", nil
 				}
-				data, err := pinchtabDo("POST", "/tabs/"+in.TabID+"/close", nil)
+				data, err := pinchtabRequestExpectingSuccess(ctx, "POST", "/tabs/"+in.TabID+"/close", nil)
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
