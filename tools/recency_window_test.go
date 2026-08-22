@@ -65,18 +65,11 @@ func relativePathsOf(files []recentFile) []string {
 	return paths
 }
 
-// writeFileAged writes a file and backdates its mtime to exactly age old.
-func writeFileAged(t *testing.T, directory, name string, age time.Duration) {
-	t.Helper()
-	path := filepath.Join(directory, name)
-	if err := os.WriteFile(path, []byte("contents of "+name+"\n"), 0o644); err != nil {
-		t.Fatalf("write %s: %v", name, err)
-	}
-	modificationTime := time.Now().Add(-age)
-	if err := os.Chtimes(path, modificationTime, modificationTime); err != nil {
-		t.Fatalf("chtimes %s: %v", name, err)
-	}
-}
+// writeFileAged lives in recent_files_test.go. Both files independently grew a
+// helper of this name and this parameter order; the other one also MkdirAlls the
+// nested paths its own callers need and returns the path it wrote, so it does
+// everything this copy did and more. Two declarations in one package is a
+// compile error, and the surviving one is the superset.
 
 // commitAged commits the named files with both git dates set to exactly age old.
 // `git log --since` reads the COMMITTER date, which is what makes this the knob
