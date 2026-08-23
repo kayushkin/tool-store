@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/kayushkin/tool-store/schema"
@@ -32,6 +33,23 @@ func (connection PinchtabConnection) baseURL() string {
 		return DefaultPinchtabURL
 	}
 	return strings.TrimRight(connection.BaseURL, "/")
+}
+
+// escapePathSegment percent-encodes a value so it occupies exactly one path
+// segment on the wire.
+//
+// Both values this guards reach the path from outside this process. tab_id is a
+// field on the browser tool's own input struct, so the model fills it; the
+// instance id comes back in PinchTab's answer to GET /instances. Concatenated
+// raw, a value carrying "/", "?" or "#" addresses a different PinchTab endpoint
+// than the one the action asked for, and does it silently: net/http strips a
+// fragment before the request leaves, and a server routes on the path alone, so
+// the wrong request comes back with a perfectly ordinary answer.
+//
+// PathEscape is a no-op for every well-formed PinchTab id, so no legitimate
+// call changes shape.
+func escapePathSegment(segment string) string {
+	return url.PathEscape(segment)
 }
 
 // pinchtabStatusError reports a PinchTab response whose status was not 2xx. It
@@ -142,9 +160,13 @@ func Browser(connection PinchtabConnection) Impl {
 				return string(data), nil
 
 			case "snapshot":
+				// url.Values, not escapePathSegment: this value sits in the
+				// query, where "&" and "=" are the separators. PathEscape
+				// leaves both alone, so it would read as a repair and still
+				// let a filter add a parameter PinchTab was never asked for.
 				path := "/snapshot"
 				if in.Filter != "" {
-					path += "?filter=" + in.Filter
+					path += "?" + url.Values{"filter": {in.Filter}}.Encode()
 				}
 				data, err := connection.requestExpectingSuccess(ctx, "GET", path, nil)
 				if err != nil {
@@ -200,7 +222,7 @@ func Browser(connection PinchtabConnection) Impl {
 				if len(instances) == 0 {
 					return "no instances running", nil
 				}
-				data, err := connection.requestExpectingSuccess(ctx, "GET", "/instances/"+instances[0].ID+"/tabs", nil)
+				data, err := connection.requestExpectingSuccess(ctx, "GET", "/instances/"+escapePathSegment(instances[0].ID)+"/tabs", nil)
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
@@ -210,7 +232,7 @@ func Browser(connection PinchtabConnection) Impl {
 				if in.TabID == "" {
 					return "error: tab_id is required for close", nil
 				}
-				data, err := connection.requestExpectingSuccess(ctx, "POST", "/tabs/"+in.TabID+"/close", nil)
+				data, err := connection.requestExpectingSuccess(ctx, "POST", "/tabs/"+escapePathSegment(in.TabID)+"/close", nil)
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
