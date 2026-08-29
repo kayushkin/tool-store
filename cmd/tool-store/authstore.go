@@ -23,6 +23,18 @@ import (
 //
 // Per the single-source-of-truth directive, missing creds fail loudly — no
 // env-var or other fallback.
+//
+// Two fields on auth-store's answer are read by nothing here. `leased` is true
+// when a client_lease credential is currently held by another process, and
+// auth-store's own doc comment for that response says the token it returns is
+// then the last known one and the lease holder is authoritative. `expires_at`
+// can be in the past, because auth-store refreshes only server-mode OAuth that
+// nobody has leased. Dropping both means a provisioned MCP server can be
+// handed a dead token and learn about it as a provider 401 much later, far
+// from the cause. Measured against the live :8303 on 2026-08-29: nothing was
+// leased and nothing was expired, so this is latent rather than live. What the
+// resolver should do instead — refuse, retry, or pass the signal up to
+// Provision — is an open question on the noteboard, not settled here.
 func resolveFromAuthStore() func(ctx context.Context, provider string) (string, error) {
 	base := strings.TrimRight(getenv("AUTH_STORE_URL", "http://127.0.0.1:8303"), "/")
 	token := os.Getenv("AUTH_STORE_TOKEN")
