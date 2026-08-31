@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -136,5 +137,69 @@ func TestTheFooterAdviceNamesSomethingTheToolActuallyOffers(t *testing.T) {
 		if !strings.Contains(out, "subdirectory") {
 			t.Errorf("the footer offers no way out of a truncated listing:\n%s", out)
 		}
+	}
+}
+
+// fileReadWholeFileLimit decides whether a whole-file read is windowed at all.
+// TestTruncateFileReadReportsWhatItKept above reaches the mechanism from both
+// sides — 100 lines whole, 3000 lines windowed — and pins fileReadKeepFirst and
+// fileReadKeepLast to 500 and 50 by naming them. It pins the LIMIT to nothing:
+// its two rows sit 1900 lines either side of it, so the limit could be anywhere
+// in [100, 2999] with that test green. Card 3c18632a's shape — a boundary the
+// suite documents, exercises on every row, and straddles on none.
+//
+// ⚠️ Spelled out, NOT `= fileReadWholeFileLimit`. A fixture written in terms of
+// the constant it is guarding agrees with itself at every value of it, which is
+// the defect tools/budget_values_test.go was written to remove from this
+// package's other budgets. This literal has to be updated by hand when the
+// limit changes on purpose, which is the whole point of it.
+func TestWholeFileLineLimitIsPinnedToItsExactValue(t *testing.T) {
+	const maxLines = 2000
+
+	// Numbered rather than uniform: a window that kept the wrong 500 lines is
+	// the same length as one that kept the right 500, so the assertions below
+	// name lines instead of counting them.
+	body := func(n int) string {
+		var b strings.Builder
+		for i := 1; i <= n; i++ {
+			fmt.Fprintf(&b, "line %d\n", i)
+		}
+		return b.String()
+	}
+
+	whole := body(maxLines)
+	kept, cut := TruncateFileRead(whole)
+	if kept != whole {
+		t.Errorf("a file of exactly %d lines was altered; the limit moved below it", maxLines)
+	}
+	if cut.Truncated() {
+		t.Errorf("a file of exactly %d lines reported as truncated: %+v", maxLines, cut)
+	}
+	if cut.TotalLines != maxLines {
+		t.Errorf("TotalLines = %d, want %d", cut.TotalLines, maxLines)
+	}
+
+	over := body(maxLines + 1)
+	kept, cut = TruncateFileRead(over)
+	if !cut.Truncated() {
+		t.Fatalf("a file of exactly %d lines — one over the limit — reported as whole: %+v",
+			maxLines+1, cut)
+	}
+	if cut.TotalLines != maxLines+1 {
+		t.Errorf("TotalLines = %d, want %d", cut.TotalLines, maxLines+1)
+	}
+	// The reported window has to match the bytes at both ends and in the hole,
+	// or the limit could move while these two rows still straddle something.
+	if !strings.Contains(kept, "line 500\n") {
+		t.Errorf("the last line of the kept head is missing; the head window moved")
+	}
+	if strings.Contains(kept, "line 501\n") {
+		t.Errorf("line 501 survived, so the head window is wider than it reports")
+	}
+	if !strings.Contains(kept, "line "+fmt.Sprint(maxLines+1-50+1)+"\n") {
+		t.Errorf("the first line of the kept tail is missing; the tail window moved")
+	}
+	if strings.Contains(kept, "line "+fmt.Sprint(maxLines+1-50)+"\n") {
+		t.Errorf("the line just before the tail window survived, so the tail started early")
 	}
 }
