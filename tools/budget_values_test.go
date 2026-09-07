@@ -34,8 +34,12 @@ import (
 //
 // ⚠️ This is a FLOOR, not a total: every budget named above is declared in
 // package tools, and so is every budget this file can reach. It is not the list
-// of budgets that decide what a tool returns. readSingleFile is the worked
-// example — it is cut by two independent limits and only one of them is here.
+// of budgets that decide what a tool returns. readSingleFile is the whole of the
+// difference — it is cut by two independent limits and only one of them is here.
+// It is the only such site: every other schema cut this package makes
+// (TruncateAtRuneBoundary, TruncateList) is handed its budget as an argument
+// declared here, so those budgets are in scope. TruncateFileRead alone carries
+// its own, which is what puts it out of reach.
 // maxWholeFileReadBytes (fs.go) is; schema.TruncateFileRead's line window is
 // not, and its fileReadWholeFileLimit, fileReadKeepFirst and fileReadKeepLast
 // are unreachable from this package because they are unexported in schema.
