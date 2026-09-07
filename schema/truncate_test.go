@@ -138,3 +138,52 @@ func TestTheFooterAdviceNamesSomethingTheToolActuallyOffers(t *testing.T) {
 		}
 	}
 }
+
+// ---- schema/truncate.go: fileReadWholeFileLimit ----
+
+// TestTruncateFileReadWholeFileLimitIsPinnedToItsExactValue straddles the line
+// count that decides whether a file is returned intact: exactly the limit must
+// come back whole, exactly one line more must be cut. That pair reddens
+// whichever way the literal moves.
+//
+// TestTruncateFileReadReportsWhatItKept above holds fileReadKeepFirst and
+// fileReadKeepLast — its 3000-line fixture asserts KeptFirst and KeptLast by
+// value — but it cannot hold this one. Its two fixtures are 100 lines and 3000
+// lines, so every limit between them leaves the short file whole and the long
+// file cut, and both assertions stay green. Measured before this test was
+// written: moving the limit to 1500 or to 2500 was invisible to the whole
+// repository suite.
+//
+// Spelled out as a literal, NOT written as `= fileReadWholeFileLimit`. A
+// fixture written in terms of the constant agrees with itself for every value
+// of it, which is the thing that let this budget drift unheld.
+func TestTruncateFileReadWholeFileLimitIsPinnedToItsExactValue(t *testing.T) {
+	const lineLimit = 2000
+
+	whole := strings.Repeat("line\n", lineLimit)
+	kept, cut := TruncateFileRead(whole)
+	if cut.Truncated() {
+		t.Errorf("a %d-line file was cut; the whole-file limit is below %d: %+v", lineLimit, lineLimit, cut)
+	}
+	if kept != whole {
+		t.Errorf("a %d-line file was altered", lineLimit)
+	}
+	if cut.TotalLines != lineLimit {
+		t.Errorf("TotalLines = %d, want %d", cut.TotalLines, lineLimit)
+	}
+
+	over := strings.Repeat("line\n", lineLimit+1)
+	kept, cut = TruncateFileRead(over)
+	if !cut.Truncated() {
+		t.Errorf("a %d-line file came back whole; the whole-file limit is above %d: %+v", lineLimit+1, lineLimit, cut)
+	}
+	if cut.TotalLines != lineLimit+1 {
+		t.Errorf("TotalLines = %d, want %d", cut.TotalLines, lineLimit+1)
+	}
+	// Assert the cut happened in the bytes too, not only in the report: a
+	// FileReadCut is built by this function and could agree with itself while
+	// the content came back whole.
+	if kept == over {
+		t.Errorf("a %d-line file reported as truncated but its content was returned intact", lineLimit+1)
+	}
+}
