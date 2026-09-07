@@ -31,6 +31,20 @@ import (
 //
 // These are insurance, not defect reports. Every value checked here was already
 // correct; nothing was holding it there.
+//
+// ⚠️ This is a FLOOR, not a total: every budget named above is declared in
+// package tools, and so is every budget this file can reach. It is not the list
+// of budgets that decide what a tool returns. readSingleFile is the worked
+// example — it is cut by two independent limits and only one of them is here.
+// maxWholeFileReadBytes (fs.go) is; schema.TruncateFileRead's line window is
+// not, and its fileReadWholeFileLimit, fileReadKeepFirst and fileReadKeepLast
+// are unreachable from this package because they are unexported in schema.
+// All three are held next door in schema/truncate_test.go, though not all in
+// this file's way: fileReadWholeFileLimit is straddled, while fileReadKeepFirst
+// and fileReadKeepLast are asserted by value off a single oversized fixture.
+// Read the two suites together before concluding a budget is covered, and when
+// a cut moves to another package its pin has to move with it — a budget that
+// leaves package tools leaves this list silently.
 
 // markedRun returns n bytes whose last byte is a marker, so an assertion can
 // name the byte the budget decides on rather than only the number of them.
