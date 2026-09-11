@@ -253,7 +253,14 @@ POST /provision
 // → {"mcpServers": { … the instance's opted-in MCP tools … }}
 ```
 
-Exactly one of `tools` and `instance_id` is required; a request carrying both is rejected, because merging a standing preference with a per-call list gives the same field two sources of truth. The two differ in how they treat a tool that is not an MCP server: `tools` names it outright, so a CLI or in-process local there is an error, while an instance's opt-in list legitimately spans every kind of tool, so the MCP subset is selected out of it. An instance nobody has ticked anything for provisions nothing and says so with `200 {}`, which is how a caller tells "no opt-ins" apart from "the lookup broke".
+A caller that already holds tool-store ids — llm-bridge-server, intersecting a principal's grant-store grants with an instance's opt-ins, has ids on both sides — names them by id instead:
+
+```jsonc
+POST /provision
+{ "tool_ids": [13, 14] }
+```
+
+Exactly one of `tools`, `tool_ids` and `instance_id` is required; a request carrying more than one is rejected, because merging a standing preference with a per-call list gives the same field two sources of truth. They differ in how they treat a tool that is not an MCP server: `tools` and `tool_ids` name it outright, so a CLI or in-process local there is an error, while an instance's opt-in list legitimately spans every kind of tool, so the MCP subset is selected out of it. An instance nobody has ticked anything for provisions nothing and says so with `200 {}`, which is how a caller tells "no opt-ins" apart from "the lookup broke".
 
 ## Design principles
 
