@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -257,5 +259,59 @@ func TestProvisionByNameStillRejectsANonMCPTool(t *testing.T) {
 	_, err := Provision(context.Background(), s, ProvisionRequest{Tools: []string{"ripgrep"}}, nil)
 	if err == nil {
 		t.Fatal("naming a CLI tool outright must still be an error")
+	}
+}
+
+// --- provisioning by id ---------------------------------------------------
+//
+// llm-bridge-server intersects a principal's grants with an instance's opt-ins
+// and holds tool-store ids on both sides, so it asks by id. Same rules as by
+// name: every id must exist, be enabled, and be an MCP tool.
+
+func TestProvisionByIDBuildsTheSameConfigAsByName(t *testing.T) {
+	s := openProvTest(t)
+	seedInstanceOptIns(t, s, "inst-1")
+	remote, err := s.GetToolByName("remote-mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID, err := Provision(context.Background(), s, ProvisionRequest{ToolIDs: []int64{remote.ID}}, nil)
+	if err != nil {
+		t.Fatalf("provision by id: %v", err)
+	}
+	byName, err := Provision(context.Background(), s, ProvisionRequest{Tools: []string{"remote-mcp"}}, nil)
+	if err != nil {
+		t.Fatalf("provision by name: %v", err)
+	}
+	if len(byID.MCPServers) != 1 || !reflect.DeepEqual(byID.MCPServers["remote-mcp"], byName.MCPServers["remote-mcp"]) {
+		t.Fatalf("by id %+v != by name %+v", byID.MCPServers, byName.MCPServers)
+	}
+}
+
+func TestProvisionByIDRefusesAMissingIdAndANonMCPTool(t *testing.T) {
+	s := openProvTest(t)
+	seedInstanceOptIns(t, s, "inst-1")
+	if _, err := Provision(context.Background(), s, ProvisionRequest{ToolIDs: []int64{999999}}, nil); err == nil || !strings.Contains(err.Error(), "tool id 999999 not found") {
+		t.Fatalf("missing id: err = %v", err)
+	}
+	cli, err := s.GetToolByName("ripgrep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Provision(context.Background(), s, ProvisionRequest{ToolIDs: []int64{cli.ID}}, nil); err == nil || !strings.Contains(err.Error(), "only mcp tools") {
+		t.Fatalf("cli by id: err = %v", err)
+	}
+}
+
+func TestProvisionRefusesMoreThanOneSource(t *testing.T) {
+	s := openProvTest(t)
+	for _, req := range []ProvisionRequest{
+		{Tools: []string{"a"}, ToolIDs: []int64{1}},
+		{ToolIDs: []int64{1}, InstanceID: "inst-1"},
+		{Tools: []string{"a"}, InstanceID: "inst-1"},
+	} {
+		if _, err := Provision(context.Background(), s, req, nil); err == nil || !strings.Contains(err.Error(), "pick one") {
+			t.Fatalf("%+v: err = %v, want a refusal to merge sources", req, err)
+		}
 	}
 }

@@ -6,17 +6,22 @@ import (
 	"fmt"
 )
 
-// ProvisionRequest says which tools to provision, in one of two ways.
+// ProvisionRequest says which tools to provision, in one of three ways.
 //
-// Either name them outright in Tools, or name an instance in InstanceID and
-// let the store read that instance's opt-in list (the rows the Tools page
-// writes through /instances/{id}/tools/by-name/{name}). Exactly one of the
-// two must be set: an empty request is an error — the caller must say what it
-// wants, no implicit "all" — and a request carrying both is an error too,
-// because merging a standing preference with a per-call list gives the same
-// field two sources of truth.
+// Name them outright — by id in ToolIDs, or by name in Tools — or name an
+// instance in InstanceID and let the store read that instance's opt-in list
+// (the rows the Tools page writes through /instances/{id}/tools/by-name/{name}).
+// Exactly one of the three must be set: an empty request is an error — the
+// caller must say what it wants, no implicit "all" — and a request carrying
+// more than one is an error too, because merging a standing preference with
+// a per-call list gives the same field two sources of truth.
+//
+// ToolIDs is the form for a caller that already holds ids from another store
+// — llm-bridge-server, intersecting a principal's grants with an instance's
+// opt-ins, has ids on both sides and no reason to go through a name.
 type ProvisionRequest struct {
 	Tools      []string `json:"tools"`
+	ToolIDs    []int64  `json:"tool_ids"`
 	InstanceID string   `json:"instance_id"`
 }
 
@@ -54,23 +59,17 @@ type MCPServerConfig struct {
 // be one auth-store already knows may be stale.
 type ResolveCredentialFunc func(ctx context.Context, provider string) (string, error)
 
-// Provision builds the MCP server config for the requested tool names. Errors
+// Provision builds the MCP server config for the requested tools. Errors
 // out (no fallback) if any tool is missing, disabled, or has env-key
 // resolution gaps.
 func Provision(ctx context.Context, s *Store, req ProvisionRequest, resolve ResolveCredentialFunc) (*ProvisionResponse, error) {
-	names, err := resolveRequestedToolNames(s, req)
+	tools, err := resolveRequestedTools(s, req)
 	if err != nil {
 		return nil, err
 	}
 	out := &ProvisionResponse{MCPServers: map[string]MCPServerConfig{}}
-	for _, name := range names {
-		t, err := s.GetToolByName(name)
-		if err != nil {
-			if errors.Is(err, ErrNotFound) {
-				return nil, fmt.Errorf("provision: tool %q not found", name)
-			}
-			return nil, fmt.Errorf("provision: lookup %q: %w", name, err)
-		}
+	for _, t := range tools {
+		name := t.Name
 		if !t.Enabled {
 			return nil, fmt.Errorf("provision: tool %q is disabled", name)
 		}
@@ -102,37 +101,67 @@ func Provision(ctx context.Context, s *Store, req ProvisionRequest, resolve Reso
 	return out, nil
 }
 
-// resolveRequestedToolNames turns a ProvisionRequest into the list of tool
-// names to build config for, rejecting a request that names neither source or
-// both.
+// resolveRequestedTools turns a ProvisionRequest into the tools to build
+// config for, rejecting a request that names no source or more than one.
 //
-// The two paths deliberately treat a non-MCP tool differently. A caller that
-// names tools outright gets an error from Provision if one of them is a CLI or
-// an in-process local, because it asked for something this endpoint cannot
-// hand back. An instance's opt-in list is not a provisioning request — it is a
-// standing preference that spans every kind of tool the instance may use — so
-// the MCP subset is selected out of it and the rest left alone. Erroring there
-// would mean one ticked CLI tool wedges MCP provisioning for that instance.
-func resolveRequestedToolNames(s *Store, req ProvisionRequest) ([]string, error) {
+// The paths deliberately treat a non-MCP tool differently. A caller that
+// names tools outright — by id or by name — gets an error from Provision if
+// one of them is a CLI or an in-process local, because it asked for something
+// this endpoint cannot hand back. An instance's opt-in list is not a
+// provisioning request — it is a standing preference that spans every kind
+// of tool the instance may use — so the MCP subset is selected out of it and
+// the rest left alone. Erroring there would mean one ticked CLI tool wedges
+// MCP provisioning for that instance.
+func resolveRequestedTools(s *Store, req ProvisionRequest) ([]*Tool, error) {
+	sources := 0
+	for _, set := range []bool{len(req.Tools) > 0, len(req.ToolIDs) > 0, req.InstanceID != ""} {
+		if set {
+			sources++
+		}
+	}
 	switch {
-	case len(req.Tools) > 0 && req.InstanceID != "":
-		return nil, errors.New("provision: request has both tools and instance_id; pick one")
+	case sources > 1:
+		return nil, errors.New("provision: request names more than one of tools, tool_ids and instance_id; pick one")
 	case len(req.Tools) > 0:
-		return req.Tools, nil
+		tools := make([]*Tool, 0, len(req.Tools))
+		for _, name := range req.Tools {
+			t, err := s.GetToolByName(name)
+			if err != nil {
+				if errors.Is(err, ErrNotFound) {
+					return nil, fmt.Errorf("provision: tool %q not found", name)
+				}
+				return nil, fmt.Errorf("provision: lookup %q: %w", name, err)
+			}
+			tools = append(tools, t)
+		}
+		return tools, nil
+	case len(req.ToolIDs) > 0:
+		tools := make([]*Tool, 0, len(req.ToolIDs))
+		for _, id := range req.ToolIDs {
+			t, err := s.GetTool(id)
+			if err != nil {
+				if errors.Is(err, ErrNotFound) {
+					return nil, fmt.Errorf("provision: tool id %d not found", id)
+				}
+				return nil, fmt.Errorf("provision: lookup id %d: %w", id, err)
+			}
+			tools = append(tools, t)
+		}
+		return tools, nil
 	case req.InstanceID != "":
-		tools, err := s.ListInstanceTools(req.InstanceID)
+		listed, err := s.ListInstanceTools(req.InstanceID)
 		if err != nil {
 			return nil, fmt.Errorf("provision: list tools for instance %q: %w", req.InstanceID, err)
 		}
-		var names []string
-		for _, t := range tools {
-			if t.Kind == KindMCP {
-				names = append(names, t.Name)
+		var tools []*Tool
+		for i := range listed {
+			if listed[i].Kind == KindMCP {
+				tools = append(tools, &listed[i])
 			}
 		}
-		return names, nil
+		return tools, nil
 	default:
-		return nil, errors.New("provision: at least one tool name or an instance_id is required")
+		return nil, errors.New("provision: one of tools, tool_ids or instance_id is required")
 	}
 }
 
