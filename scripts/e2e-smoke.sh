@@ -219,9 +219,17 @@ echo "    $(jq_val 'length') local rows, all disabled, symbols intact"
 step "GET /tools?kind=mcp — curated MCP servers seeded"
 STATUS=$(api GET '/tools?kind=mcp')
 expect_status 200 "$STATUS" "GET /tools?kind=mcp"
-for want in brave-search playwright chrome-devtools; do
+for want in brave-search playwright chrome-devtools \
+            context7 deepwiki fetch time knowledge-graph-memory sequential-thinking \
+            github sentry notion firecrawl exa supabase; do
   jq_true "any(.[]; .name == \"$want\")" "GET /tools?kind=mcp missing seeded server '$want'"
 done
+# Every curated MCP seed arrives disabled on a virgin DB, like the locals.
+jq_true 'all(.[]; .enabled == false)' "freshly seeded mcp tools should default to enabled=false"
+# deepwiki is the one http-transport seed — url must persist and command stay empty.
+jq_true '.[] | select(.name=="deepwiki")
+         | (.mcp.transport == "http") and (.mcp.url == "https://mcp.deepwiki.com/mcp") and ((.mcp.command // "") == "")' \
+  "deepwiki seed lost its http transport or url in the DB round-trip"
 # The launcher spec must survive the encode → SQLite → decode round-trip.
 jq_eq '.[] | select(.name=="playwright") | .mcp.command' 'npx' "playwright seed"
 jq_true '.[] | select(.name=="playwright") | .mcp.args | index("--headless") != null' \
