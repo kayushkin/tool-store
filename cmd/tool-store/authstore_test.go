@@ -185,7 +185,7 @@ func TestEachAuthTypeIsReadOutOfTheFieldAuthStoreFillsForIt(t *testing.T) {
 // without the explicit refusal the caller would be handed "".
 func TestAPasswordCredentialIsRefusedRatherThanResolvedToTheEmptyString(t *testing.T) {
 	stub := &authStoreStub{provider: "mail", body: map[string]any{
-		"auth_type": "password", "username": "vlad", "password": "pw",
+		"auth_type": "password", "username": "slava", "password": "pw",
 		"host": "mail.example.com", "port": 993, "tls": true, "leased": false,
 	}}
 	got, err := newResolver(t, stub.start(t), "")(context.Background(), "mail")
