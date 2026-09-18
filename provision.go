@@ -45,20 +45,6 @@ type MCPServerConfig struct {
 	Type    string            `json:"type,omitempty"`
 }
 
-// ResolveCredentialFunc resolves a credential for an auth-store provider name
-// to the key or token auth-store currently holds for it. Returns an error if
-// the provider is unknown or no credential is enabled — provisioning fails
-// loudly rather than producing a half-configured tool.
-//
-// It does not promise a value that still works, and the wording used to say
-// "active", which read as if it did. auth-store refreshes an expired OAuth
-// token only when the credential's refresh_mode is "server" and it is not
-// leased; in every other case it answers 200 with the token it has stored and
-// declares the risk in two response fields, expires_at and leased. The
-// resolver in cmd/tool-store reads neither, so the value handed back here can
-// be one auth-store already knows may be stale.
-type ResolveCredentialFunc func(ctx context.Context, provider string) (string, error)
-
 // Provision builds the MCP server config for the requested tools. Errors
 // out (no fallback) if any tool is missing, disabled, or has env-key
 // resolution gaps.

@@ -69,3 +69,11 @@ type CLISpec struct {
 type LocalSpec struct {
 	Symbol string `json:"symbol"`
 }
+
+// LocalDescriptor describes one in-process registered local tool — what's
+// available to be enabled via POST /tools.
+type LocalDescriptor struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+}
