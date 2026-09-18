@@ -13,14 +13,6 @@ import (
 // JSON-encoded input body. Returns the tool's string output.
 type InvokeLocalFunc func(ctx context.Context, name, input string) (string, error)
 
-// LocalDescriptor describes one in-process registered local tool — what's
-// available to be enabled via POST /tools.
-type LocalDescriptor struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"input_schema,omitempty"`
-}
-
 // ListLocalsFunc returns the in-process registered local tools — used for
 // discovery on GET /locals.
 type ListLocalsFunc func() []LocalDescriptor
@@ -380,3 +372,17 @@ func parseID(s string) (int64, error) {
 	}
 	return id, nil
 }
+
+// ResolveCredentialFunc resolves a credential for an auth-store provider name
+// to the key or token auth-store currently holds for it. Returns an error if
+// the provider is unknown or no credential is enabled — provisioning fails
+// loudly rather than producing a half-configured tool.
+//
+// It does not promise a value that still works, and the wording used to say
+// "active", which read as if it did. auth-store refreshes an expired OAuth
+// token only when the credential's refresh_mode is "server" and it is not
+// leased; in every other case it answers 200 with the token it has stored and
+// declares the risk in two response fields, expires_at and leased. The
+// resolver in cmd/tool-store reads neither, so the value handed back here can
+// be one auth-store already knows may be stale.
+type ResolveCredentialFunc func(ctx context.Context, provider string) (string, error)
