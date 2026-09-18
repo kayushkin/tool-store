@@ -1,0 +1,35 @@
+# About tool-store
+
+## What it owns
+
+`:8302`. The canonical registry of tools that can be given to a harness: MCP servers, CLI commands and in-process Go implementations (`kind` `mcp`, `cli`, `local`). It replaced agentkit and carries agentkit's in-process tools under `tools/`, seeded disabled. It owns a tool's definition and numeric id, the master `enabled` flag, and which instances have opted in to which tool. Who may use a tool is grant-store's; which tools a session is offered is decided in llm-bridge-server (`internal/server/tool_provision.go` there). README "HTTP API" is the route table.
+
+## Where this prompt lives
+
+These sections are stored in agent-store as a project prompt collection and rendered, with identical text, to `AGENTS.md` and `CLAUDE.md` at the root of this repo, so that whichever file a harness reads it gets the same thing. Edit them on dash `/files`, or edit either rendered file: the 15-minute scan carries the edit back into the sections and out to the other file. The host prompt keeps one row for this repo with only what an agent elsewhere needs.
+
+# How it works
+
+## Global is master, then the instance opts in
+
+A tool has a global `enabled` flag, set by `POST /tools/{id}/enable` and `/disable`. **Global is master**: `EnableForInstance` refuses a tool that is globally off (`ErrGloballyDisabled`, nothing written), and every read of an instance's tools joins on `tools.enabled = 1`, so switching a tool off globally removes it from every instance at once without touching their opt-in rows. `instance_tools` is the opt-in list — `GET /instances/{id}/tools`, `POST` and `DELETE /instances/{id}/tools/by-name/{name}`, and `GET /tools/by-name/{name}/instances` for the reverse view. The bridge's Tools page is its editor.
+
+## Provisioning
+
+`POST /provision` returns Claude Code MCP config for a set of tools, with each env value resolved from auth-store (`AUTH_STORE_URL`, `AUTH_STORE_TOKEN`). The request names the set in **exactly one** of three ways — `tools` (names), `tool_ids` (ids; what llm-bridge-server sends for a principal's granted tools or a bundle's members) or `instance_id` (that instance's opt-ins, MCP subset). An empty request and a request naming more than one are both errors (`provision.go`), and a request for a CLI or local tool by name fails rather than returning less than was asked for. `GET /tools/by-name/{name}/spec` and `POST /tools/by-name/{name}/invoke` serve and run an in-process tool; `GET /locals` lists the local implementations compiled in.
+
+# Access and operations
+
+## Who may call it
+
+No authentication. The unit sets `TOOL_STORE_ADDR=:8302`, so it listens on every interface. dash proxies it at `/api/tool-store/*` behind dash's login. Unit `tool-store.service`, binary `~/bin/tool-store`. ⚠️ **The tracked `tool-store.service` carries a value for `AUTH_STORE_TOKEN`, and this repo is public** — noteboard todo `25654f1f-d8d3-4210-9687-76f3e5ae5608`. Do not add another secret to the tracked unit: a token belongs in a host-local drop-in under `~/.config/systemd/user/tool-store.service.d/`, mode 600.
+
+# Working in this repo
+
+## Build, test and deploy
+
+Module `github.com/kayushkin/tool-store`, root package `toolstore`, server in `cmd/tool-store`, local tool implementations in `tools/`. SQLite at `~/.config/tool-store/tool-store.db`. Plain `go build` and `go test ./...`. ⚠️ **Check `git branch --show-current` in the main clone before trusting `git log -1`**: this clone once sat on a side branch for weeks and commits were made there as if it were main, including one llm-bridge-server depended on. The repo still carries about 23 unmerged branches and 11 worktrees, most under `~/.worktrees/`; one commit from that episode (`b858476`, a lock in `scripts/sabotage.py`) conflicts with main and is noteboard todo `5b22a163-d005-45b5-8414-1b4f7ec6b138`.
+
+## Generated TypeScript types
+
+`./generate-ts.sh` runs tygo and writes the wire types to `ts/` as `@kayushkin/tool-store-types`. `tygo.yaml` excludes `store.go` and `server.go`, so a wire type must live elsewhere to be rendered — `LocalDescriptor` sits in `tool.go` with `Tool` for that reason.
