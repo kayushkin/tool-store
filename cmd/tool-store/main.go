@@ -13,18 +13,27 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kayushkin/llm-bridge/servicesettings"
 	toolstore "github.com/kayushkin/tool-store"
 	"github.com/kayushkin/tool-store/tools"
 )
 
 func main() {
-	addr := os.Getenv("TOOL_STORE_ADDR")
-	if addr == "" {
-		addr = ":8302"
+	// Every environment variable the service reads is declared in settings.go.
+	// A value that does not parse, or a set TOOL_STORE_ADDR… or
+	// TOOL_STORE_DATA_DIR… variable nobody declared, stops the start here.
+	settings, err := toolstore.NewSettingsRegistry(servicesettings.ProcessEnvironment())
+	if err != nil {
+		log.Fatalf("settings: %v", err)
 	}
-	dataDir := os.Getenv("TOOL_STORE_DATA_DIR")
+	addr := settings.String(toolstore.SettingListenAddress)
 
-	store, err := toolstore.Open(dataDir)
+	// Before the registry of in-process tools is listed or seeded: browser,
+	// web_search and scheduler are in it only once they are given where
+	// PinchTab, Brave and the scheduler are.
+	tools.RegisterToolsThatReachOutsideServices(toolstore.OutsideServiceConnectionsFrom(settings))
+
+	store, err := toolstore.Open(settings.String(toolstore.SettingDataDirectory))
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
@@ -38,7 +47,7 @@ func main() {
 	}
 
 	opts := toolstore.HandlerOptions{
-		ResolveCredential: resolveFromAuthStore(),
+		ResolveCredential: resolveFromAuthStore(settings.String(toolstore.SettingAuthStoreURL), settings.String(toolstore.SettingAuthStoreToken)),
 		InvokeLocal: func(ctx context.Context, name, input string) (string, error) {
 			impl, ok := tools.ByName(name)
 			if !ok {
@@ -62,6 +71,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	toolstore.RegisterHandlers(mux, store, opts)
+	toolstore.RegisterSettingsHandler(mux, settings)
 
 	srv := &http.Server{
 		Addr:              addr,

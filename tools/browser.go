@@ -8,22 +8,31 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 
 	
 	"github.com/kayushkin/tool-store/schema"
 )
 
-func pinchtabURL() string {
-	if u := os.Getenv("PINCHTAB_URL"); u != "" {
-		return strings.TrimRight(u, "/")
-	}
-	return "http://localhost:9867"
+// DefaultPinchtabURL is where PinchTab answers when nothing says otherwise.
+const DefaultPinchtabURL = "http://localhost:9867"
+
+// PinchtabConnection is where the browser tool finds PinchTab and what it
+// presents there. The tool does not read the environment: whoever builds it
+// says where PinchTab is, so a service can declare the two values as settings
+// and a command-line program can read them however it likes.
+type PinchtabConnection struct {
+	// BaseURL is PinchTab's address. Empty means DefaultPinchtabURL.
+	BaseURL string
+	// Token is sent as a bearer token when it is not empty.
+	Token string
 }
 
-func pinchtabToken() string {
-	return os.Getenv("PINCHTAB_TOKEN")
+func (connection PinchtabConnection) baseURL() string {
+	if connection.BaseURL == "" {
+		return DefaultPinchtabURL
+	}
+	return strings.TrimRight(connection.BaseURL, "/")
 }
 
 // pinchtabStatusError reports a PinchTab response whose status was not 2xx. It
@@ -38,7 +47,7 @@ func (e *pinchtabStatusError) Error() string {
 	return fmt.Sprintf("pinchtab returned %d: %s", e.StatusCode, e.Body)
 }
 
-// pinchtabRequestExpectingSuccess sends one request to PinchTab and returns the
+// requestExpectingSuccess sends one request to PinchTab and returns the
 // response body only when the status is 2xx. A non-2xx is an error, never a
 // body.
 //
@@ -51,8 +60,8 @@ func (e *pinchtabStatusError) Error() string {
 //
 // It also used http.NewRequest, so no caller's context reached the request and
 // cancelling a browser tool call cancelled nothing.
-func pinchtabRequestExpectingSuccess(ctx context.Context, method, path string, body any) ([]byte, error) {
-	base := pinchtabURL()
+func (connection PinchtabConnection) requestExpectingSuccess(ctx context.Context, method, path string, body any) ([]byte, error) {
+	base := connection.baseURL()
 	var bodyReader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -68,8 +77,8 @@ func pinchtabRequestExpectingSuccess(ctx context.Context, method, path string, b
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if tok := pinchtabToken(); tok != "" {
-		req.Header.Set("Authorization", "Bearer "+tok)
+	if connection.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+connection.Token)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -86,8 +95,9 @@ func pinchtabRequestExpectingSuccess(ctx context.Context, method, path string, b
 	return data, nil
 }
 
-// Browser returns a tool that controls a browser via PinchTab's HTTP API.
-func Browser() Impl {
+// Browser returns a tool that controls a browser via PinchTab's HTTP API at
+// connection.
+func Browser(connection PinchtabConnection) Impl {
 	type input struct {
 		Action string `json:"action"`
 		URL    string `json:"url"`
@@ -126,7 +136,7 @@ func Browser() Impl {
 				if in.URL == "" {
 					return "error: url is required for navigate", nil
 				}
-				data, err := pinchtabRequestExpectingSuccess(ctx, "POST", "/navigate", map[string]string{"url": in.URL})
+				data, err := connection.requestExpectingSuccess(ctx, "POST", "/navigate", map[string]string{"url": in.URL})
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
@@ -137,7 +147,7 @@ func Browser() Impl {
 				if in.Filter != "" {
 					path += "?filter=" + in.Filter
 				}
-				data, err := pinchtabRequestExpectingSuccess(ctx, "GET", path, nil)
+				data, err := connection.requestExpectingSuccess(ctx, "GET", path, nil)
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
@@ -147,7 +157,7 @@ func Browser() Impl {
 				if in.Ref == "" {
 					return "error: ref is required for click", nil
 				}
-				data, err := pinchtabRequestExpectingSuccess(ctx, "POST", "/action", map[string]string{"kind": "click", "ref": in.Ref})
+				data, err := connection.requestExpectingSuccess(ctx, "POST", "/action", map[string]string{"kind": "click", "ref": in.Ref})
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
@@ -157,28 +167,28 @@ func Browser() Impl {
 				if in.Ref == "" {
 					return "error: ref is required for type", nil
 				}
-				data, err := pinchtabRequestExpectingSuccess(ctx, "POST", "/action", map[string]string{"kind": "type", "ref": in.Ref, "text": in.Text})
+				data, err := connection.requestExpectingSuccess(ctx, "POST", "/action", map[string]string{"kind": "type", "ref": in.Ref, "text": in.Text})
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
 				return string(data), nil
 
 			case "text":
-				data, err := pinchtabRequestExpectingSuccess(ctx, "GET", "/text", nil)
+				data, err := connection.requestExpectingSuccess(ctx, "GET", "/text", nil)
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
 				return string(data), nil
 
 			case "screenshot":
-				data, err := pinchtabRequestExpectingSuccess(ctx, "GET", "/screenshot", nil)
+				data, err := connection.requestExpectingSuccess(ctx, "GET", "/screenshot", nil)
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
 				return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(data), nil
 
 			case "tabs":
-				instData, err := pinchtabRequestExpectingSuccess(ctx, "GET", "/instances", nil)
+				instData, err := connection.requestExpectingSuccess(ctx, "GET", "/instances", nil)
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
@@ -191,7 +201,7 @@ func Browser() Impl {
 				if len(instances) == 0 {
 					return "no instances running", nil
 				}
-				data, err := pinchtabRequestExpectingSuccess(ctx, "GET", "/instances/"+instances[0].ID+"/tabs", nil)
+				data, err := connection.requestExpectingSuccess(ctx, "GET", "/instances/"+instances[0].ID+"/tabs", nil)
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}
@@ -201,7 +211,7 @@ func Browser() Impl {
 				if in.TabID == "" {
 					return "error: tab_id is required for close", nil
 				}
-				data, err := pinchtabRequestExpectingSuccess(ctx, "POST", "/tabs/"+in.TabID+"/close", nil)
+				data, err := connection.requestExpectingSuccess(ctx, "POST", "/tabs/"+in.TabID+"/close", nil)
 				if err != nil {
 					return fmt.Sprintf("error: %s", err), nil
 				}

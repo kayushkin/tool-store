@@ -10,3 +10,4 @@ packages:
     exclude_files:
       - "store.go"
       - "server.go"
+      - "settings.go"

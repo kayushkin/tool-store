@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -64,8 +63,22 @@ type schedulerInput struct {
 	Enabled      *bool   `json:"enabled,omitempty"`         // enable/disable for update
 }
 
-// Scheduler returns a tool that interacts with the scheduler HTTP API at localhost:8092.
-func Scheduler() Impl {
+// DefaultSchedulerURL is where the scheduler answers when nothing says otherwise.
+const DefaultSchedulerURL = "http://localhost:8092"
+
+// SchedulerConnection is where the scheduler tool finds the scheduler and what
+// it presents there. The tool does not read the environment: whoever builds it
+// says where the scheduler is.
+type SchedulerConnection struct {
+	// BaseURL is the scheduler's address. Empty means DefaultSchedulerURL.
+	BaseURL string
+	// Token is sent as a bearer token when it is not empty.
+	Token string
+}
+
+// Scheduler returns a tool that interacts with the scheduler HTTP API at
+// connection.
+func Scheduler(connection SchedulerConnection) Impl {
 	return Impl{
 		Name:        "scheduler",
 		Description: "Interact with the scheduler HTTP API to manage cron jobs. Supports listing, creating, updating, deleting jobs, and viewing run history.",
@@ -92,12 +105,12 @@ func Scheduler() Impl {
 				return "", err
 			}
 
-			baseURL := os.Getenv("SCHEDULER_URL")
+			baseURL := connection.BaseURL
 			if baseURL == "" {
-				baseURL = "http://localhost:8092"
+				baseURL = DefaultSchedulerURL
 			}
 
-			token := os.Getenv("SCHEDULER_TOKEN")
+			token := connection.Token
 
 			switch in.Action {
 			case "list":

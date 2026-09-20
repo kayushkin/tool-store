@@ -19,13 +19,12 @@ import (
 // therefore has a 200 control beside it, so the assertions cannot be satisfied
 // by a helper that simply fails on everything.
 
-// pinchtabServing points the tool at a stub PinchTab and returns its URL.
-func pinchtabServing(t *testing.T, handler http.HandlerFunc) {
+// pinchtabServing starts a stub PinchTab and returns the connection to it.
+func pinchtabServing(t *testing.T, handler http.HandlerFunc) PinchtabConnection {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	t.Setenv("PINCHTAB_URL", server.URL)
-	t.Setenv("PINCHTAB_TOKEN", "")
+	return PinchtabConnection{BaseURL: server.URL}
 }
 
 // respondWith answers every request with one status and one body.
@@ -36,9 +35,9 @@ func respondWith(status int, body string) http.HandlerFunc {
 	}
 }
 
-func runBrowser(t *testing.T, arguments string) string {
+func runBrowser(t *testing.T, connection PinchtabConnection, arguments string) string {
 	t.Helper()
-	output, err := Browser().Run(context.Background(), arguments)
+	output, err := Browser(connection).Run(context.Background(), arguments)
 	if err != nil {
 		t.Fatalf("the browser tool returned a transport error: %v", err)
 	}
@@ -47,7 +46,7 @@ func runBrowser(t *testing.T, arguments string) string {
 
 // ---- the failures that are not a status ----
 //
-// pinchtabRequestExpectingSuccess has five producers of a nil body and only two
+// requestExpectingSuccess has five producers of a nil body and only two
 // of them were pinned: the non-2xx above, and the transport error the
 // cancellation case at the foot of this file carries. Measured 2026-08-21 on
 // this branch with one mutation per producer: the marshal arm, the request-build
@@ -56,7 +55,7 @@ func runBrowser(t *testing.T, arguments string) string {
 // rather than dead code.
 //
 // Two of the three are reachable without touching the package: the request-build
-// arm through PINCHTAB_URL, which is configuration, and the body-read arm through
+// arm through the connection's BaseURL, which is configuration, and the body-read arm through
 // a response that stops early, which is any dropped connection. The marshal arm
 // is not — every caller in this file hands it a map of strings — so it is left
 // stated rather than papered over with a test that cannot fail for the right
@@ -67,13 +66,12 @@ func runBrowser(t *testing.T, arguments string) string {
 // configuration mistake or a dropped connection from reading to whoever is
 // looking as something PinchTab said.
 
-// A PINCHTAB_URL that will not parse is the operator's mistake, and it must not
+// A PinchTab URL that will not parse is the operator's mistake, and it must not
 // arrive looking like an answer from a browser that was never contacted.
 func TestAPinchtabURLThatWillNotParseIsReportedAsTheOperatorsMistake(t *testing.T) {
-	t.Setenv("PINCHTAB_URL", "http://localhost:9867/\x7f")
-	t.Setenv("PINCHTAB_TOKEN", "")
+	connection := PinchtabConnection{BaseURL: "http://localhost:9867/\x7f"}
 
-	_, err := pinchtabRequestExpectingSuccess(context.Background(), "GET", "/text", nil)
+	_, err := connection.requestExpectingSuccess(context.Background(), "GET", "/text", nil)
 	if err == nil {
 		t.Fatal("a URL holding a control character was accepted and requested")
 	}
@@ -91,13 +89,13 @@ func TestAPinchtabURLThatWillNotParseIsReportedAsTheOperatorsMistake(t *testing.
 // connection. Returning the bytes that did arrive would hand the model half a
 // snapshot as if it were the whole one.
 func TestABodyThatStopsEarlyIsAnErrorRatherThanAShortResult(t *testing.T) {
-	pinchtabServing(t, func(w http.ResponseWriter, r *http.Request) {
+	connection := pinchtabServing(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "64")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("half a snapshot"))
 	})
 
-	data, err := pinchtabRequestExpectingSuccess(context.Background(), "GET", "/text", nil)
+	data, err := connection.requestExpectingSuccess(context.Background(), "GET", "/text", nil)
 	if err == nil {
 		t.Fatalf("a truncated body was returned as the result: %q", data)
 	}
@@ -116,9 +114,9 @@ func TestABodyThatStopsEarlyIsAnErrorRatherThanAShortResult(t *testing.T) {
 // The starkest case: a navigate PinchTab rejected used to read to the model as a
 // navigation that worked, because the rejection body was returned as the result.
 func TestNavigateReportsARejectionInsteadOfReturningItAsTheResult(t *testing.T) {
-	pinchtabServing(t, respondWith(http.StatusNotFound, `{"error":"no tab to navigate"}`))
+	connection := pinchtabServing(t, respondWith(http.StatusNotFound, `{"error":"no tab to navigate"}`))
 
-	output := runBrowser(t, `{"action":"navigate","url":"https://example.invalid"}`)
+	output := runBrowser(t, connection, `{"action":"navigate","url":"https://example.invalid"}`)
 
 	if !strings.Contains(output, "404") {
 		t.Errorf("a 404 from PinchTab did not reach the model as a failure: %q", output)
@@ -129,9 +127,9 @@ func TestNavigateReportsARejectionInsteadOfReturningItAsTheResult(t *testing.T) 
 }
 
 func TestNavigateStillReturnsTheBodyOnSuccess(t *testing.T) {
-	pinchtabServing(t, respondWith(http.StatusOK, `{"ok":true}`))
+	connection := pinchtabServing(t, respondWith(http.StatusOK, `{"ok":true}`))
 
-	output := runBrowser(t, `{"action":"navigate","url":"https://example.invalid"}`)
+	output := runBrowser(t, connection, `{"action":"navigate","url":"https://example.invalid"}`)
 
 	if output != `{"ok":true}` {
 		t.Errorf("a successful navigate no longer returns PinchTab's body verbatim: %q", output)
@@ -141,9 +139,9 @@ func TestNavigateStillReturnsTheBodyOnSuccess(t *testing.T) {
 // A 2xx that is not 200 is still a success. Without this the status check could
 // be written as `!= 200` and pass everything above.
 func TestANonTwoHundredSuccessStatusIsStillASuccess(t *testing.T) {
-	pinchtabServing(t, respondWith(http.StatusAccepted, `queued`))
+	connection := pinchtabServing(t, respondWith(http.StatusAccepted, `queued`))
 
-	output := runBrowser(t, `{"action":"click","ref":"e3"}`)
+	output := runBrowser(t, connection, `{"action":"click","ref":"e3"}`)
 
 	if output != "queued" {
 		t.Errorf("202 Accepted was treated as a failure: %q", output)
@@ -155,9 +153,9 @@ func TestANonTwoHundredSuccessStatusIsStillASuccess(t *testing.T) {
 // the tool reported "no instances running", which is indistinguishable from a
 // browser that is running with nothing open.
 func TestTabsDoesNotReportAnErrorResponseAsAnEmptyBrowser(t *testing.T) {
-	pinchtabServing(t, respondWith(http.StatusUnauthorized, `[]`))
+	connection := pinchtabServing(t, respondWith(http.StatusUnauthorized, `[]`))
 
-	output := runBrowser(t, `{"action":"tabs"}`)
+	output := runBrowser(t, connection, `{"action":"tabs"}`)
 
 	if strings.Contains(output, "no instances running") {
 		t.Errorf("a 401 was reported as a browser with no instances: %q", output)
@@ -170,9 +168,9 @@ func TestTabsDoesNotReportAnErrorResponseAsAnEmptyBrowser(t *testing.T) {
 // ...and the reading it is confusable with has to keep working, or the
 // assertion above could pass by never producing that message at all.
 func TestTabsStillReportsAGenuinelyEmptyBrowser(t *testing.T) {
-	pinchtabServing(t, respondWith(http.StatusOK, `[]`))
+	connection := pinchtabServing(t, respondWith(http.StatusOK, `[]`))
 
-	output := runBrowser(t, `{"action":"tabs"}`)
+	output := runBrowser(t, connection, `{"action":"tabs"}`)
 
 	if output != "no instances running" {
 		t.Errorf("an empty instance list on a 200 no longer reports an empty browser: %q", output)
@@ -182,7 +180,7 @@ func TestTabsStillReportsAGenuinelyEmptyBrowser(t *testing.T) {
 // The second request `tabs` makes is the one nothing was watching: the instance
 // list can succeed and the per-instance tab fetch fail.
 func TestTabsReportsAFailureOnTheSecondRequest(t *testing.T) {
-	pinchtabServing(t, func(w http.ResponseWriter, r *http.Request) {
+	connection := pinchtabServing(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/instances" {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`[{"id":"i1"}]`))
@@ -192,7 +190,7 @@ func TestTabsReportsAFailureOnTheSecondRequest(t *testing.T) {
 		_, _ = w.Write([]byte(`instance went away`))
 	})
 
-	output := runBrowser(t, `{"action":"tabs"}`)
+	output := runBrowser(t, connection, `{"action":"tabs"}`)
 
 	if !strings.Contains(output, "500") {
 		t.Errorf("a 500 on the tab list did not reach the model: %q", output)
@@ -205,9 +203,9 @@ func TestTabsReportsAFailureOnTheSecondRequest(t *testing.T) {
 // answers it — the encoder is never reached with a body PinchTab did not stand
 // behind.
 func TestScreenshotDoesNotEncodeAnErrorPageAsAnImage(t *testing.T) {
-	pinchtabServing(t, respondWith(http.StatusInternalServerError, `PinchTab crashed`))
+	connection := pinchtabServing(t, respondWith(http.StatusInternalServerError, `PinchTab crashed`))
 
-	output := runBrowser(t, `{"action":"screenshot"}`)
+	output := runBrowser(t, connection, `{"action":"screenshot"}`)
 
 	if strings.HasPrefix(output, "data:image/jpeg;base64,") {
 		t.Errorf("an error page was handed to the model as an image: %q", output)
@@ -218,9 +216,9 @@ func TestScreenshotDoesNotEncodeAnErrorPageAsAnImage(t *testing.T) {
 }
 
 func TestScreenshotStillEncodesARealScreenshot(t *testing.T) {
-	pinchtabServing(t, respondWith(http.StatusOK, "\xff\xd8\xff jpeg bytes"))
+	connection := pinchtabServing(t, respondWith(http.StatusOK, "\xff\xd8\xff jpeg bytes"))
 
-	output := runBrowser(t, `{"action":"screenshot"}`)
+	output := runBrowser(t, connection, `{"action":"screenshot"}`)
 
 	want := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte("\xff\xd8\xff jpeg bytes"))
 	if output != want {
@@ -231,9 +229,9 @@ func TestScreenshotStillEncodesARealScreenshot(t *testing.T) {
 // The status belongs to the error as a number, not only inside a formatted
 // string, so a caller can branch on it without parsing prose.
 func TestTheStatusIsRecoverableFromTheError(t *testing.T) {
-	pinchtabServing(t, respondWith(http.StatusTeapot, `short and stout`))
+	connection := pinchtabServing(t, respondWith(http.StatusTeapot, `short and stout`))
 
-	_, err := pinchtabRequestExpectingSuccess(context.Background(), "GET", "/text", nil)
+	_, err := connection.requestExpectingSuccess(context.Background(), "GET", "/text", nil)
 
 	var status *pinchtabStatusError
 	if !errors.As(err, &status) {
@@ -254,7 +252,7 @@ func TestTheStatusIsRecoverableFromTheError(t *testing.T) {
 func TestCancellingABrowserCallStopsTheRequest(t *testing.T) {
 	released := make(chan struct{})
 	defer close(released)
-	pinchtabServing(t, func(w http.ResponseWriter, r *http.Request) {
+	connection := pinchtabServing(t, func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 		case <-released:
@@ -265,7 +263,7 @@ func TestCancellingABrowserCallStopsTheRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	finished := make(chan string, 1)
 	go func() {
-		output, _ := Browser().Run(ctx, `{"action":"navigate","url":"https://example.invalid"}`)
+		output, _ := Browser(connection).Run(ctx, `{"action":"navigate","url":"https://example.invalid"}`)
 		finished <- output
 	}()
 

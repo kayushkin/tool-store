@@ -89,7 +89,7 @@ A no-dependency builder for tool input schemas. `Props(required, properties)` re
 import "github.com/kayushkin/tool-store/tools"
 ```
 
-The Go-native tool implementations that ship inside `tool-store`. Each is an `Impl{ Name, Description, InputSchema, Run }`. They register themselves via `init()`. Consumers call `Register`, `ByName`, `All`.
+The Go-native tool implementations that ship inside `tool-store`. Each is an `Impl{ Name, Description, InputSchema, Run }`. Those that need nothing from their caller register themselves via `init()`. Consumers call `Register`, `ByName`, `All`.
 
 | Tool | Description |
 |------|-------------|
@@ -101,6 +101,8 @@ The Go-native tool implementations that ship inside `tool-store`. Each is an `Im
 | `browser` | Browser automation via PinchTab |
 | `scheduler` | Manage cron jobs via the scheduler service |
 | `end_turn` | Signal end of an agent turn |
+
+`browser`, `web_search` and `scheduler` reach an outside service, and the package reads no environment variable to find it: build them with `Browser(PinchtabConnection)`, `WebSearch(braveAPIKey)` and `Scheduler(SchedulerConnection)`, or register all three with `RegisterToolsThatReachOutsideServices(OutsideServiceConnections)`.
 
 Context-bearing tools (`recent_files`, `repo_map`, `scratchpad`, `task_plan`) are exposed as factories rather than auto-registered — they need a per-instance `repoRoot` / `agentName` and are typically wired from above (e.g. by [llm-bridge-server](https://github.com/kayushkin/llm-bridge-server) at session bring-up).
 
@@ -114,14 +116,21 @@ go build ./cmd/tool-store
 
 Starts an HTTP server (default `:8302`) backed by SQLite at `~/.config/tool-store/tool-store.db`. Wires the `tools` package into `RegisterHandlers` so local tools are invokable in-process and discoverable via `GET /locals`.
 
-Environment:
+Environment — every variable is declared once in `settings.go`, and `GET /settings` shows the values in force (a secret shows only whether it is set):
 - `TOOL_STORE_ADDR` — listen address (default `:8302`)
 - `TOOL_STORE_DATA_DIR` — data directory (default `~/.config/tool-store`)
+- `AUTH_STORE_URL`, `AUTH_STORE_TOKEN` — where `POST /provision` resolves credentials (default `http://127.0.0.1:8303`)
+- `PINCHTAB_URL`, `PINCHTAB_TOKEN` — the `browser` tool's PinchTab (default `http://localhost:9867`)
+- `BRAVE_API_KEY` — the in-process `web_search` tool's key
+- `SCHEDULER_URL`, `SCHEDULER_TOKEN` — the `scheduler` tool's scheduler (default `http://localhost:8092`)
+
+A set variable that begins `TOOL_STORE_ADDR` or `TOOL_STORE_DATA_DIR` and is not one of those two stops the start: it is a misspelling.
 
 ## HTTP API
 
 ```
 GET    /health
+GET    /settings                               every environment variable the process reads, and the value in force
 GET    /tools                                  ?kind=&tag=&q=&enabled=true&limit=
 POST   /tools                                  body: full Tool JSON (upsert by name)
 GET    /tools/{id}

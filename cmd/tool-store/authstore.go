@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 )
@@ -17,9 +16,9 @@ import (
 // HTTP API (canonical credential service). The resolver is invoked from
 // /provision when an MCP tool needs an env var resolved.
 //
-// Configuration:
-//   AUTH_STORE_URL    base URL of auth-store (default http://127.0.0.1:8303)
-//   AUTH_STORE_TOKEN  bearer token (matches auth-store's AUTHSTORE_TOKEN env)
+// authStoreURL and token are the auth_store_url and auth_store_token settings
+// (AUTH_STORE_URL, AUTH_STORE_TOKEN; the token matches auth-store's own
+// AUTHSTORE_TOKEN). The resolver reads no environment variable itself.
 //
 // Per the single-source-of-truth directive, missing creds fail loudly — no
 // env-var or other fallback.
@@ -35,9 +34,8 @@ import (
 // leased and nothing was expired, so this is latent rather than live. What the
 // resolver should do instead — refuse, retry, or pass the signal up to
 // Provision — is an open question on the noteboard, not settled here.
-func resolveFromAuthStore() func(ctx context.Context, provider string) (string, error) {
-	base := strings.TrimRight(getenv("AUTH_STORE_URL", "http://127.0.0.1:8303"), "/")
-	token := os.Getenv("AUTH_STORE_TOKEN")
+func resolveFromAuthStore(authStoreURL, token string) func(ctx context.Context, provider string) (string, error) {
+	base := strings.TrimRight(authStoreURL, "/")
 
 	client := &http.Client{Timeout: 10 * time.Second}
 
@@ -88,11 +86,4 @@ func resolveFromAuthStore() func(ctx context.Context, provider string) (string, 
 			return "", fmt.Errorf("auth-store: provider %q has unsupported auth_type %q", provider, out.AuthType)
 		}
 	}
-}
-
-func getenv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }

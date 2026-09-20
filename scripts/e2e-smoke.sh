@@ -178,6 +178,19 @@ step "assert the fresh DB landed in the temp dir, not the real one"
   || fail "server fell back to the default \$HOME data dir despite TOOL_STORE_DATA_DIR"
 echo "    db: $DATA_DIR/tool-store.db"
 
+# The settings the binary serves are the ones it runs on: the port this script
+# chose, read from the environment. A registry that is built and never read from
+# would show the default here, and no unit test sees that.
+step "GET /settings — the listen address is the one this script set"
+STATUS=$(api GET /settings)
+expect_status 200 "$STATUS" "GET /settings"
+jq_eq '.service' 'tool-store' "GET /settings"
+jq_true "any(.settings[]; .key == \"listen_address\" and .value == \":$PORT\" and .source == \"environment\")" \
+  "GET /settings does not show listen_address=:$PORT from the environment"
+jq_true "any(.settings[]; .key == \"data_directory\" and .value == \"$DATA_DIR\")" \
+  "GET /settings does not show data_directory=$DATA_DIR"
+echo "    settings OK"
+
 # ---------------------------------------------------------------------------
 # Seeds. First boot against an empty file must run the schema migration, seed
 # the in-process local tools (cmd/tool-store/main.go seedLocalTools) and the
@@ -189,7 +202,7 @@ STATUS=$(api GET /locals)
 expect_status 200 "$STATUS" "GET /locals"
 LOCALS_COUNT=$(jq_val 'length')
 [ "$LOCALS_COUNT" -ge 1 ] || fail "GET /locals returned no in-process tools"
-for want in end_turn shell_commands ripgrep web_fetch scheduler; do
+for want in end_turn shell_commands ripgrep web_fetch scheduler browser web_search; do
   jq_true "any(.[]; .name == \"$want\")" "GET /locals missing expected in-process tool '$want'"
 done
 # Every descriptor must carry a description and an input schema, or harnesses

@@ -7,15 +7,17 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 
 	
 	"github.com/kayushkin/tool-store/schema"
 )
 
-// WebSearch returns a tool that searches the web using the Brave Search API.
-func WebSearch() Impl {
+// WebSearch returns a tool that searches the web using the Brave Search API
+// with braveAPIKey. The tool does not read the environment: whoever builds it
+// supplies the key. With an empty key every search answers that the key is
+// not set, naming the variable an operator would set.
+func WebSearch(braveAPIKey string) Impl {
 	type input struct {
 		Query   string `json:"query"`
 		Count   int    `json:"count"`
@@ -35,7 +37,7 @@ func WebSearch() Impl {
 				return "", err
 			}
 
-			apiKey := os.Getenv("BRAVE_API_KEY")
+			apiKey := braveAPIKey
 			if apiKey == "" {
 				return "error: BRAVE_API_KEY environment variable not set", nil
 			}

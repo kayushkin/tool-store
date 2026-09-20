@@ -92,9 +92,7 @@ func resolvedAPIKey(key string) map[string]any {
 
 func newResolver(t *testing.T, base, token string) func(context.Context, string) (string, error) {
 	t.Helper()
-	t.Setenv("AUTH_STORE_URL", base)
-	t.Setenv("AUTH_STORE_TOKEN", token)
-	return resolveFromAuthStore()
+	return resolveFromAuthStore(base, token)
 }
 
 func TestResolveSendsTheAppAndReasonHeadersAuthStoreRequires(t *testing.T) {
