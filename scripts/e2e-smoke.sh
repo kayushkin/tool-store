@@ -255,7 +255,7 @@ jq_true 'all(.[]; .description | length > 0)' "every kind on GET /kinds needs a 
 step "GET /tools?kind=harness&harness=… — harness tools seeded enabled"
 STATUS=$(api GET '/tools?kind=harness&harness=claude_code')
 expect_status 200 "$STATUS" "GET /tools?kind=harness&harness=claude_code"
-jq_eq 'length' '28' "claude_code harness seed count"
+jq_eq 'length' '37' "claude_code harness seed count"
 jq_true 'all(.[]; .enabled == true and .kind == "harness" and .harness == "claude_code" and .name == ("claude_code." + .harness_tool_name))' \
   "claude_code harness rows should be enabled and named claude_code.<harness_tool_name>"
 jq_eq '[.[] | select(.tags | index("runs-commands")) | .name] | join(",")' 'claude_code.Bash,claude_code.Monitor' \

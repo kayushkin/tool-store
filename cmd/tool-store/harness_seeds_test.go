@@ -37,7 +37,7 @@ func TestSeedHarnessToolsCreatesEveryToolEnabled(t *testing.T) {
 			}
 		}
 	}
-	if len(claudeCodeTools) != 28 || len(codexTools) != 12 {
+	if len(claudeCodeTools) != 37 || len(codexTools) != 12 {
 		t.Fatalf("seed set changed size: claude_code %d, codex %d", len(claudeCodeTools), len(codexTools))
 	}
 }

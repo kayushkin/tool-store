@@ -33,7 +33,8 @@ const (
 	harnessCodex      = "codex"
 )
 
-// claudeCodeTools is measured from Claude Code 2.1.280's init event, plus the
+// claudeCodeTools is measured from Claude Code 2.1.280's init event and the
+// init tool lists llm-bridge sessions report, plus the
 // tools the llm-bridge-claudecode wrapper names itself.
 var claudeCodeTools = []harnessToolSeed{
 	{"Read", "Read a file from the local filesystem, including images, PDFs and notebooks.", []string{tagReadOnly}},
@@ -64,6 +65,17 @@ var claudeCodeTools = []harnessToolSeed{
 	{"AskUserQuestion", "Ask the user a multiple-choice question and wait for the answer.", nil},
 	{"ExitPlanMode", "Present a plan to the user and leave plan mode once they approve it.", nil},
 	{"TodoWrite", "Write the session's task list.", nil},
+	// Seen in the init tool lists of llm-bridge sessions over 2026-08-25 to
+	// 2026-09-24 (sessions.info in the bridge database) and missing above.
+	{"TaskCreate", "Add an item to the session's task list.", nil},
+	{"TaskGet", "Read one item of the session's task list.", []string{tagReadOnly}},
+	{"TaskList", "List the session's task list.", []string{tagReadOnly}},
+	{"TaskUpdate", "Change an item of the session's task list.", nil},
+	{"TaskOutput", "Read the output of a background task the session started.", []string{tagReadOnly}},
+	{"EnterPlanMode", "Enter plan mode, where the session plans before it changes anything.", nil},
+	{"DesignSync", "Sync designs with an outside design service.", []string{tagEffects}},
+	{"ReportFindings", "Report code-review findings as a typed list for the host UI.", nil},
+	{"ShareOnboardingGuide", "Share an onboarding guide outside the session.", []string{tagEffects}},
 }
 
 // codexTools is codex-cli 0.156.1's stable tool features from
