@@ -56,6 +56,9 @@ func Provision(ctx context.Context, s *Store, req ProvisionRequest, resolve Reso
 	out := &ProvisionResponse{MCPServers: map[string]MCPServerConfig{}}
 	for _, t := range tools {
 		name := t.Name
+		if t.Kind == KindHarness {
+			return nil, fmt.Errorf("provision: tool %q is a built-in tool of the %s harness; the harness provides it, so leave it out of a provision request (only mcp tools are provisionable here)", name, t.Harness)
+		}
 		if !t.Enabled {
 			return nil, fmt.Errorf("provision: tool %q is disabled", name)
 		}

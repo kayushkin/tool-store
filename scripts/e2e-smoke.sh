@@ -193,8 +193,9 @@ echo "    settings OK"
 
 # ---------------------------------------------------------------------------
 # Seeds. First boot against an empty file must run the schema migration, seed
-# the in-process local tools (cmd/tool-store/main.go seedLocalTools) and the
-# curated MCP servers (seeds.go seedMCPTools), then serve them back. Asserting
+# the in-process local tools (cmd/tool-store/main.go seedLocalTools), the
+# curated MCP servers (seeds.go seedMCPTools) and the Claude Code and Codex
+# built-in tools (harness_seeds.go seedHarnessTools), then serve them back. Asserting
 # these round-trip proves migrate + seed + query all work on a virgin DB.
 # ---------------------------------------------------------------------------
 step "GET /locals — in-process tool registry is exposed"
@@ -244,6 +245,37 @@ jq_true '.[] | select(.name=="brave-search")
          | (.env_keys | index("BRAVE_API_KEY") != null) and (.credentials.BRAVE_API_KEY == "brave")' \
   "brave-search seed lost its env_keys/credentials mapping"
 echo "    mcp seeds OK (playwright launcher + brave-search credential mapping round-tripped)"
+
+step "GET /kinds — the kind vocabulary, harness included"
+STATUS=$(api GET /kinds)
+expect_status 200 "$STATUS" "GET /kinds"
+jq_eq '[.[].kind] | join(",")' 'mcp,cli,local,harness' "GET /kinds"
+jq_true 'all(.[]; .description | length > 0)' "every kind on GET /kinds needs a description"
+
+step "GET /tools?kind=harness&harness=… — harness tools seeded enabled"
+STATUS=$(api GET '/tools?kind=harness&harness=claude_code')
+expect_status 200 "$STATUS" "GET /tools?kind=harness&harness=claude_code"
+jq_eq 'length' '28' "claude_code harness seed count"
+jq_true 'all(.[]; .enabled == true and .kind == "harness" and .harness == "claude_code" and .name == ("claude_code." + .harness_tool_name))' \
+  "claude_code harness rows should be enabled and named claude_code.<harness_tool_name>"
+jq_eq '[.[] | select(.tags | index("runs-commands")) | .name] | join(",")' 'claude_code.Bash,claude_code.Monitor' \
+  "claude_code runs-commands tags"
+STATUS=$(api GET '/tools?kind=harness&harness=codex')
+expect_status 200 "$STATUS" "GET /tools?kind=harness&harness=codex"
+jq_eq 'length' '12' "codex harness seed count"
+jq_eq '[.[] | select(.tags | index("runs-commands")) | .name] | join(",")' 'codex.shell_tool,codex.unified_exec' \
+  "codex runs-commands tags"
+STATUS=$(api GET '/tools?kind=harness&harness=no-such-harness')
+expect_status 200 "$STATUS" "GET /tools?harness=no-such-harness"
+jq_eq 'length' '0' "an unknown harness id matches nothing"
+STATUS=$(api POST '/tools/by-name/claude_code.Bash/invoke' '{"command":"true"}')
+expect_status 409 "$STATUS" "invoke on a harness tool"
+jq_true '.error | test("harness")' "invoke on a harness tool should say the harness runs it"
+STATUS=$(api GET '/tools/by-name/codex.shell_tool/spec')
+expect_status 409 "$STATUS" "spec of a harness tool"
+STATUS=$(api POST /provision '{"tools":["claude_code.Read"]}')
+expect_status 400 "$STATUS" "POST /provision with a harness tool"
+echo "    harness seeds OK"
 
 # ---------------------------------------------------------------------------
 # Write path: register a tool through the real route, read it back, run it.
@@ -301,10 +333,11 @@ expect_status 200 "$STATUS" "GET /tools?tag=e2e"
 jq_true "any(.[]; .name == \"$TOOL_NAME\")" "?tag=e2e did not match the tool we just registered"
 STATUS=$(api GET '/tools?enabled=true')
 expect_status 200 "$STATUS" "GET /tools?enabled=true"
-# Every seed is disabled, so our tool must be the only enabled row on a fresh DB.
-ENABLED_NAMES=$(jq -r '.[].name' <"$RESP" | paste -sd' ')
+# Every local and mcp seed is disabled and every harness seed is enabled, so
+# our tool must be the only enabled row that is not kind=harness on a fresh DB.
+ENABLED_NAMES=$(jq -r '.[] | select(.kind != "harness") | .name' <"$RESP" | paste -sd' ')
 [ "$ENABLED_NAMES" = "$TOOL_NAME" ] \
-  || fail "?enabled=true should list exactly [$TOOL_NAME] on a fresh DB, got [$ENABLED_NAMES]"
+  || fail "?enabled=true should list exactly [$TOOL_NAME] besides harness tools on a fresh DB, got [$ENABLED_NAMES]"
 STATUS=$(api GET '/tools?kind=bogus')
 expect_status 400 "$STATUS" "GET /tools?kind=bogus (invalid kind must be rejected)"
 echo "    filters OK"

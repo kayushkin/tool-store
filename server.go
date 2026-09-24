@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -31,6 +32,7 @@ func RegisterHandlers(mux *http.ServeMux, s *Store, opts HandlerOptions) {
 	h := &handler{s: s, opts: opts}
 
 	mux.HandleFunc("GET /health", h.health)
+	mux.HandleFunc("GET /kinds", h.listKinds)
 
 	mux.HandleFunc("GET /tools", h.listTools)
 	mux.HandleFunc("POST /tools", h.upsertTool)
@@ -71,10 +73,25 @@ func (h *handler) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
+func (h *handler) listKinds(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, 200, Kinds)
+}
+
+// refuseHarnessTool answers 409 for a route tool-store cannot serve for a
+// harness tool, because the harness runs it. Reports whether it answered.
+func refuseHarnessTool(w http.ResponseWriter, t *Tool, route string) bool {
+	if t.Kind != KindHarness {
+		return false
+	}
+	writeErr(w, 409, fmt.Sprintf("tool %s is a built-in tool of the %s harness, which runs it as %s; tool-store has no %s for it", t.Name, t.Harness, t.HarnessToolName, route))
+	return true
+}
+
 func (h *handler) listTools(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := ListFilter{
 		Kind:        Kind(q.Get("kind")),
+		Harness:     q.Get("harness"),
 		Tag:         q.Get("tag"),
 		Query:       q.Get("q"),
 		EnabledOnly: q.Get("enabled") == "true",
@@ -213,6 +230,9 @@ func (h *handler) invokeByName(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	if refuseHarnessTool(w, t, "invoke") {
+		return
+	}
 	if !t.Enabled {
 		writeErr(w, 409, "tool is disabled")
 		return
@@ -261,6 +281,9 @@ func (h *handler) specByName(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeErr(w, 500, err.Error())
+		return
+	}
+	if refuseHarnessTool(w, t, "spec") {
 		return
 	}
 	switch t.Kind {

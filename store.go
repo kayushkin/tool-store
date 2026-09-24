@@ -1,8 +1,9 @@
 // Package toolstore is the canonical registry for tools that can be seeded
 // into harnesses (Claude Code, openclaw, jig, codex, inber, etc.) via
-// llm-bridge-server. It supports three kinds of tools: external MCP servers,
-// arbitrary CLI commands, and Go functions registered into the tool-store
-// binary at build time.
+// llm-bridge-server. It supports four kinds of tools: external MCP servers,
+// arbitrary CLI commands, Go functions registered into the tool-store binary
+// at build time, and the built-in tools of agent harnesses, which the harness
+// runs and tool-store only records.
 package toolstore
 
 import (
@@ -54,29 +55,15 @@ func Open(dataDir string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("enable WAL: %w", err)
 	}
+	if err := migrateToolsTableToAcceptHarnessTools(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("rebuild tools table for harness tools: %w", err)
+	}
 	if _, err := db.Exec(schemaSQL); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	if err := migrateAddCredentialsColumn(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate credentials column: %w", err)
-	}
 	return &Store{db: db, dataDir: dataDir}, nil
-}
-
-// migrateAddCredentialsColumn brings older DBs (pre-credentials) up to the
-// current shape. Idempotent: if the column already exists, ALTER TABLE errors
-// with "duplicate column name" and we skip. Any other error propagates.
-func migrateAddCredentialsColumn(db *sql.DB) error {
-	_, err := db.Exec(`ALTER TABLE tools ADD COLUMN credentials TEXT NOT NULL DEFAULT ''`)
-	if err == nil {
-		return nil
-	}
-	if strings.Contains(err.Error(), "duplicate column name") {
-		return nil
-	}
-	return err
 }
 
 func (s *Store) Close() error    { return s.db.Close() }
@@ -92,7 +79,10 @@ func validate(t *Tool) error {
 		return errors.New("tool: name is required")
 	}
 	if !t.Kind.Valid() {
-		return fmt.Errorf("tool %s: kind %q must be one of mcp, cli, local", t.Name, t.Kind)
+		return fmt.Errorf("tool %s: kind %q must be one of %s", t.Name, t.Kind, strings.Join(KindNames(), ", "))
+	}
+	if t.Kind != KindHarness && (t.Harness != "" || t.HarnessToolName != "") {
+		return fmt.Errorf("tool %s: harness and harness_tool_name are only for kind=harness, not kind=%s", t.Name, t.Kind)
 	}
 	switch t.Kind {
 	case KindMCP:
@@ -118,6 +108,16 @@ func validate(t *Tool) error {
 	case KindLocal:
 		if t.Local == nil || t.Local.Symbol == "" {
 			return fmt.Errorf("tool %s: local.symbol is required for kind=local", t.Name)
+		}
+	case KindHarness:
+		if t.Harness == "" || t.HarnessToolName == "" {
+			return fmt.Errorf("tool %s: harness and harness_tool_name are required for kind=harness", t.Name)
+		}
+		if want := HarnessToolRowName(t.Harness, t.HarnessToolName); t.Name != want {
+			return fmt.Errorf("tool %s: a kind=harness tool must be named %q (<harness>.<harness_tool_name>)", t.Name, want)
+		}
+		if t.MCP != nil || t.CLI != nil || t.Local != nil {
+			return fmt.Errorf("tool %s: a kind=harness tool carries no mcp, cli or local spec; the harness runs it", t.Name)
 		}
 	}
 	return nil
@@ -165,12 +165,12 @@ func (s *Store) UpsertTool(t *Tool) (bool, error) {
 			display_name=?, description=?, kind=?, input_schema=?, env_keys=?, credentials=?, tags=?,
 			mcp_transport=?, mcp_command=?, mcp_args=?, mcp_url=?,
 			cli_command=?, cli_args_template=?, cli_working_dir=?, cli_timeout_ms=?,
-			local_symbol=?, enabled=?, updated_at=?
+			local_symbol=?, harness=?, harness_tool_name=?, enabled=?, updated_at=?
 		WHERE name=?
 	`, t.DisplayName, t.Description, string(t.Kind), inputSchema, envKeys, credentials, tags,
 		mcpTransport, mcpCommand, mcpArgs, mcpURL,
 		cliCommand, cliArgsTemplate, cliWorkDir, cliTimeoutMs,
-		localSymbol, boolToInt(t.Enabled), t.UpdatedAt, t.Name)
+		localSymbol, t.Harness, t.HarnessToolName, boolToInt(t.Enabled), t.UpdatedAt, t.Name)
 	if err != nil {
 		return false, err
 	}
@@ -183,12 +183,12 @@ func (s *Store) UpsertTool(t *Tool) (bool, error) {
 			name, display_name, description, kind, input_schema, env_keys, credentials, tags,
 			mcp_transport, mcp_command, mcp_args, mcp_url,
 			cli_command, cli_args_template, cli_working_dir, cli_timeout_ms,
-			local_symbol, enabled, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			local_symbol, harness, harness_tool_name, enabled, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, t.Name, t.DisplayName, t.Description, string(t.Kind), inputSchema, envKeys, credentials, tags,
 		mcpTransport, mcpCommand, mcpArgs, mcpURL,
 		cliCommand, cliArgsTemplate, cliWorkDir, cliTimeoutMs,
-		localSymbol, boolToInt(t.Enabled), t.CreatedAt, t.UpdatedAt)
+		localSymbol, t.Harness, t.HarnessToolName, boolToInt(t.Enabled), t.CreatedAt, t.UpdatedAt)
 	if err != nil {
 		return false, err
 	}
@@ -203,7 +203,8 @@ const toolCols = `tools.id, tools.name, tools.display_name, tools.description, t
 	tools.input_schema, tools.env_keys, tools.credentials, tools.tags,
 	tools.mcp_transport, tools.mcp_command, tools.mcp_args, tools.mcp_url,
 	tools.cli_command, tools.cli_args_template, tools.cli_working_dir, tools.cli_timeout_ms,
-	tools.local_symbol, tools.enabled, tools.created_at, tools.updated_at`
+	tools.local_symbol, tools.harness, tools.harness_tool_name,
+	tools.enabled, tools.created_at, tools.updated_at`
 
 func scanTool(row interface{ Scan(...any) error }) (*Tool, error) {
 	t := &Tool{}
@@ -220,7 +221,7 @@ func scanTool(row interface{ Scan(...any) error }) (*Tool, error) {
 		&t.ID, &t.Name, &t.DisplayName, &t.Description, &kind, &inputSchema, &envKeys, &credentials, &tags,
 		&mcpTransport, &mcpCommand, &mcpArgs, &mcpURL,
 		&cliCommand, &cliArgsTemplate, &cliWorkDir, &cliTimeoutMs,
-		&localSymbol, &enabled, &t.CreatedAt, &t.UpdatedAt,
+		&localSymbol, &t.Harness, &t.HarnessToolName, &enabled, &t.CreatedAt, &t.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
@@ -269,6 +270,7 @@ func (s *Store) GetToolByName(name string) (*Tool, error) {
 // ListFilter narrows ListTools.
 type ListFilter struct {
 	Kind        Kind
+	Harness     string // exact match on the harness id; harness ids are llm-bridge-server's
 	EnabledOnly bool
 	Tag         string // matches if tags JSON array contains this string
 	Query       string // substring match on name/description
@@ -281,6 +283,10 @@ func (s *Store) ListTools(f ListFilter) ([]Tool, error) {
 	if f.Kind != "" {
 		q += ` AND kind = ?`
 		args = append(args, string(f.Kind))
+	}
+	if f.Harness != "" {
+		q += ` AND harness = ?`
+		args = append(args, f.Harness)
 	}
 	if f.EnabledOnly {
 		q += ` AND enabled = 1`

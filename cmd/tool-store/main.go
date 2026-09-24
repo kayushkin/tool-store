@@ -45,6 +45,9 @@ func main() {
 	if err := seedMCPTools(store); err != nil {
 		log.Fatalf("seed mcp tools: %v", err)
 	}
+	if err := seedHarnessTools(store); err != nil {
+		log.Fatalf("seed harness tools: %v", err)
+	}
 
 	opts := toolstore.HandlerOptions{
 		ResolveCredential: resolveFromAuthStore(settings.String(toolstore.SettingAuthStoreURL), settings.String(toolstore.SettingAuthStoreToken)),

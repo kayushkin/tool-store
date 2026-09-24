@@ -39,15 +39,16 @@ Every component is part of the [llm-bridge](https://github.com/kayushkin/llm-bri
   ╚═══════════════════════════════════════════════════════╝
 ```
 
-A tool registered in tool-store can be one of three **kinds**, each with a different execution path:
+A tool registered in tool-store can be one of four **kinds**, each with a different execution path. `GET /kinds` serves the list with a line on each; `Kinds` in `tool.go` is the one copy of it.
 
 | Kind | What it is | How tool-store handles it |
 |------|------------|---------------------------|
 | `local` | A Go function compiled into the tool-store binary | Invoked in-process via `POST /tools/by-name/{name}/invoke` |
 | `cli`   | An arbitrary command + argv template | tool-store substitutes `{{var}}` placeholders from the input JSON, execs the binary, and returns stdout |
 | `mcp`   | An external MCP server (stdio / http / sse) | Not invoked here — clients fetch the launcher spec via `/tools/by-name/{name}/spec` and spawn it themselves (e.g. Claude Code via `--mcp-config`) |
+| `harness` | A built-in tool of an agent harness (Claude Code's `Read`, Codex's `shell_tool`) | Not run here, and never — the harness runs it. tool-store records it and its `enabled` flag so a caller can switch it off. `/invoke` and `/spec` answer 409, `/provision` refuses it |
 
-tool-store seeds its own registry on startup with every in-process tool the binary ships, but every newly seeded row starts **disabled**. Operators (or eventually a UI) explicitly enable a tool when they want it. Existing rows preserve whatever enabled state they have, so a deliberate enable or disable survives restarts. Discovery via `GET /locals` shows what's available regardless of registration state.
+tool-store seeds its own registry on startup with every in-process tool the binary ships and a short list of MCP servers, and every such new row starts **disabled**. It also seeds the built-in tools of Claude Code and Codex as `kind=harness` rows, and those start **enabled**, because the harness offers them unless told otherwise; an existing harness row keeps its `enabled` flag and its description, and takes its tags from `cmd/tool-store/harness_seeds.go`. Operators (or eventually a UI) explicitly enable a tool when they want it. Existing rows preserve whatever enabled state they have, so a deliberate enable or disable survives restarts. Discovery via `GET /locals` shows what's available regardless of registration state.
 
 ## What you get
 
@@ -69,7 +70,7 @@ tool-store seeds its own registry on startup with every in-process tool the bina
 import toolstore "github.com/kayushkin/tool-store"
 ```
 
-- `Tool`, `Kind` (`mcp` | `cli` | `local`), `MCPSpec`, `CLISpec`, `LocalSpec`
+- `Tool`, `Kind` (`mcp` | `cli` | `local` | `harness`), `Kinds`, `KindDescriptor`, `MCPSpec`, `CLISpec`, `LocalSpec`, `HarnessToolRowName`
 - `Open(dataDir) (*Store, error)` — opens the SQLite-backed store
 - `UpsertTool`, `GetTool`, `GetToolByName`, `ListTools`, `DeleteTool`, `SetEnabled`
 - `RegisterHandlers(mux, store, HandlerOptions)` — wires the REST API onto an `*http.ServeMux`
@@ -131,15 +132,16 @@ A set variable that begins `TOOL_STORE_ADDR` or `TOOL_STORE_DATA_DIR` and is not
 ```
 GET    /health
 GET    /settings                               every environment variable the process reads, and the value in force
-GET    /tools                                  ?kind=&tag=&q=&enabled=true&limit=
+GET    /kinds                                  the tool kinds, each with a one-line description
+GET    /tools                                  ?kind=&harness=&tag=&q=&enabled=true&limit=  (a bare JSON array of Tool)
 POST   /tools                                  body: full Tool JSON (upsert by name)
 GET    /tools/{id}
 DELETE /tools/{id}
 POST   /tools/{id}/enable
 POST   /tools/{id}/disable
 GET    /tools/by-name/{name}
-GET    /tools/by-name/{name}/spec              CLI/MCP launcher spec (for harnesses that run tools themselves)
-POST   /tools/by-name/{name}/invoke            body: input JSON; only valid for kind=local or kind=cli
+GET    /tools/by-name/{name}/spec              CLI/MCP launcher spec (for harnesses that run tools themselves); 409 for kind=harness
+POST   /tools/by-name/{name}/invoke            body: input JSON; only valid for kind=local or kind=cli; 409 for kind=harness
 GET    /locals                                 in-process registry (what's available to enable)
 
 GET    /instances/{id}/tools                   tools opted-in for this harness instance
@@ -147,6 +149,21 @@ POST   /instances/{id}/tools/by-name/{name}    enable a tool for this instance
 DELETE /instances/{id}/tools/by-name/{name}    disable a tool for this instance
 GET    /tools/by-name/{name}/instances         every instance opted into this tool
 ```
+
+### Harness tools
+
+A `kind=harness` row is a built-in tool of an agent harness. Two fields carry it, and every other kind leaves both empty:
+
+- `harness` — the llm-bridge harness id (`claude_code`, `codex`). llm-bridge-server owns these ids, so `?harness=` filters by the exact string and an unknown one matches nothing rather than failing.
+- `harness_tool_name` — the name the harness itself uses (`Read`, `shell_tool`).
+
+The row's `name` must be `<harness>.<harness_tool_name>` (`claude_code.Read`, `codex.web_search`), which keeps it apart from a local tool with the same bare name; both the store and a CHECK in `schema.sql` refuse anything else. Tags say what a tool does where that is plain: `read-only`, `effects` (changes files, runs commands, sends, schedules or reaches the network), and `runs-commands` on the tools that run shell commands (`claude_code.Bash`, `claude_code.Monitor`, `codex.shell_tool`, `codex.unified_exec`).
+
+```bash
+curl -s "http://localhost:8302/tools?kind=harness&harness=claude_code" | jq '.[] | {id, name, harness_tool_name, enabled, tags}'
+```
+
+A database made before the harness kind is rebuilt on the first open (`migrate.go`): every row keeps its id, and the `instance_tools` rows with it.
 
 ### Per-instance opt-in
 
@@ -273,8 +290,8 @@ Exactly one of `tools`, `tool_ids` and `instance_id` is required; a request carr
 
 ## Design principles
 
-- **Disabled by default.** The registry seeds itself with every in-process tool, but every new row starts disabled. Enabling is the deliberate act — no tool is silently active.
+- **Disabled by default, except what the harness already has.** The registry seeds itself with every in-process tool, and every new row of those starts disabled. Enabling is the deliberate act — no tool tool-store runs is silently active. Harness tools start enabled, because the harness offers them whatever tool-store says; the row makes switching one off possible.
 - **Layers are transparent.** Input JSON, output strings, and launcher specs pass through unchanged. CLI substitution is literal — no shell, no quoting heuristics.
 - **Single source of credentials.** Tools declare which env vars they need (`env_keys`); the values come from the canonical credential store at provision time, never from tool-store rows.
-- **Three kinds, one shape.** `local`, `cli`, and `mcp` share the same `Tool` schema. Consumers branch on `kind` only when they have to.
+- **Four kinds, one shape.** `local`, `cli`, `mcp` and `harness` share the same `Tool` schema. Consumers branch on `kind` only when they have to.
 - **Independent of any LLM SDK.** The schema is plain JSON Schema. Bring your own provider.

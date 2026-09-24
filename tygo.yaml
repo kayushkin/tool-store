@@ -11,3 +11,4 @@ packages:
       - "store.go"
       - "server.go"
       - "settings.go"
+      - "migrate.go"

@@ -1,10 +1,16 @@
 -- tool-store schema
 -- Registry of tools that can be seeded into harnesses (Claude Code, openclaw,
--- jig, codex, inber, etc.) via llm-bridge-server. Three kinds:
---   mcp   — external MCP server (stdio/http/sse), spawned by the harness
---   cli   — arbitrary executable invoked via template-substituted argv
---   local — Go function registered into the tool-store binary at build time
---           (typically agentkit tools)
+-- jig, codex, inber, etc.) via llm-bridge-server. Four kinds (Kinds in tool.go
+-- is the list; a test holds the CHECK below to it):
+--   mcp     — external MCP server (stdio/http/sse), spawned by the harness
+--   cli     — arbitrary executable invoked via template-substituted argv
+--   local   — Go function registered into the tool-store binary at build time
+--             (typically agentkit tools)
+--   harness — a built-in tool of an agent harness (Claude Code's Read); the
+--             harness runs it, tool-store records it and its enabled flag
+--
+-- A database made before the harness kind has a CHECK without it and no
+-- harness columns; Open rebuilds that table (migrate.go).
 
 PRAGMA foreign_keys = ON;
 
@@ -13,7 +19,7 @@ CREATE TABLE IF NOT EXISTS tools (
     name            TEXT UNIQUE NOT NULL,
     display_name    TEXT NOT NULL DEFAULT '',
     description     TEXT NOT NULL DEFAULT '',
-    kind            TEXT NOT NULL,                 -- 'mcp' | 'cli' | 'local'
+    kind            TEXT NOT NULL,                 -- 'mcp' | 'cli' | 'local' | 'harness'
 
     input_schema    TEXT NOT NULL DEFAULT '',      -- JSON object, optional for mcp
     env_keys        TEXT NOT NULL DEFAULT '',      -- JSON array of required env var names
@@ -35,15 +41,23 @@ CREATE TABLE IF NOT EXISTS tools (
     -- local
     local_symbol    TEXT NOT NULL DEFAULT '',      -- e.g. "agentkit/tools.Shell"
 
+    -- harness
+    harness           TEXT NOT NULL DEFAULT '',    -- llm-bridge harness id, e.g. 'claude_code'
+    harness_tool_name TEXT NOT NULL DEFAULT '',    -- the harness's own name, e.g. 'Read'
+
     enabled         INTEGER NOT NULL DEFAULT 1,
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
 
-    CHECK (kind IN ('mcp', 'cli', 'local'))
+    CHECK (kind IN ('mcp', 'cli', 'local', 'harness')),
+    CHECK ((kind = 'harness') = (harness <> '' AND harness_tool_name <> '')),
+    CHECK (kind <> 'harness' OR name = harness || '.' || harness_tool_name),
+    CHECK (kind = 'harness' OR (harness = '' AND harness_tool_name = ''))
 );
 
 CREATE INDEX IF NOT EXISTS idx_tools_kind    ON tools(kind);
 CREATE INDEX IF NOT EXISTS idx_tools_enabled ON tools(enabled);
+CREATE INDEX IF NOT EXISTS idx_tools_harness ON tools(harness);
 
 -- instance_tools: per-instance opt-in. A row means this tool is enabled for
 -- this harness instance. Global enabled flag on `tools` is master — a row
