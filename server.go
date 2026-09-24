@@ -37,6 +37,7 @@ func RegisterHandlers(mux *http.ServeMux, s *Store, opts HandlerOptions) {
 	mux.HandleFunc("GET /tools", h.listTools)
 	mux.HandleFunc("POST /tools", h.upsertTool)
 	mux.HandleFunc("GET /tools/{id}", h.getTool)
+	mux.HandleFunc("PATCH /tools/{id}", h.patchTool)
 	mux.HandleFunc("DELETE /tools/{id}", h.deleteTool)
 	mux.HandleFunc("POST /tools/{id}/enable", h.enableTool)
 	mux.HandleFunc("POST /tools/{id}/disable", h.disableTool)
@@ -44,6 +45,8 @@ func RegisterHandlers(mux *http.ServeMux, s *Store, opts HandlerOptions) {
 	mux.HandleFunc("GET /tools/by-name/{name}", h.getToolByName)
 	mux.HandleFunc("GET /tools/by-name/{name}/spec", h.specByName)
 	mux.HandleFunc("POST /tools/by-name/{name}/invoke", h.invokeByName)
+
+	mux.HandleFunc("POST /harness-tools/observed", h.recordObservedHarnessTools)
 
 	mux.HandleFunc("GET /locals", h.listLocals)
 	mux.HandleFunc("POST /provision", h.provision)
@@ -100,6 +103,14 @@ func (h *handler) listTools(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid kind: "+string(f.Kind))
 		return
 	}
+	if notSeenSince := q.Get("not_seen_since"); notSeenSince != "" {
+		since, err := strconv.ParseInt(notSeenSince, 10, 64)
+		if err != nil || since < 0 {
+			writeErr(w, 400, "invalid not_seen_since: want unix seconds")
+			return
+		}
+		f.NotSeenSince = &since
+	}
 	if lim := q.Get("limit"); lim != "" {
 		n, err := strconv.Atoi(lim)
 		if err != nil {
@@ -109,6 +120,10 @@ func (h *handler) listTools(w http.ResponseWriter, r *http.Request) {
 		f.Limit = n
 	}
 	tools, err := h.s.ListTools(f)
+	if errors.Is(err, ErrNotSeenSinceNeedsHarnessKind) {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -117,6 +132,80 @@ func (h *handler) listTools(w http.ResponseWriter, r *http.Request) {
 		tools = []Tool{}
 	}
 	writeJSON(w, 200, tools)
+}
+
+func (h *handler) recordObservedHarnessTools(w http.ResponseWriter, r *http.Request) {
+	var request ObservedHarnessToolsRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeErr(w, 400, "invalid json: "+err.Error())
+		return
+	}
+	response, err := h.s.RecordObservedHarnessTools(r.Context(), request)
+	switch {
+	case errors.Is(err, ErrInvalidObservedHarnessTools):
+		writeErr(w, 400, err.Error())
+	case errors.Is(err, ErrObservedNameHeldByAnotherKind):
+		writeErr(w, 409, err.Error())
+	case err != nil:
+		writeErr(w, 500, err.Error())
+	default:
+		writeJSON(w, 200, response)
+	}
+}
+
+// patchTool changes any of tags, description and enabled on one tool. An
+// unknown field, a null value or an empty body is a 400, so a misspelled
+// field is never taken for "change nothing".
+func (h *handler) patchTool(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	var fields map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+		writeErr(w, 400, "invalid json: "+err.Error())
+		return
+	}
+	var patch ToolPatch
+	for field, value := range fields {
+		if string(value) == "null" {
+			writeErr(w, 400, fmt.Sprintf("field %q is null; leave it out to keep it", field))
+			return
+		}
+		var target any
+		switch field {
+		case "tags":
+			patch.Tags = new([]string)
+			target = patch.Tags
+		case "description":
+			patch.Description = new(string)
+			target = patch.Description
+		case "enabled":
+			patch.Enabled = new(bool)
+			target = patch.Enabled
+		default:
+			writeErr(w, 400, fmt.Sprintf("unknown field %q; PATCH takes tags, description, enabled", field))
+			return
+		}
+		if err := json.Unmarshal(value, target); err != nil {
+			writeErr(w, 400, fmt.Sprintf("field %q: %v", field, err))
+			return
+		}
+	}
+	tool, err := h.s.PatchTool(id, patch)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		writeErr(w, 404, "tool not found")
+	case errors.Is(err, ErrInvalidToolPatch):
+		writeErr(w, 400, err.Error())
+	case err != nil:
+		writeErr(w, 500, err.Error())
+	default:
+		writeJSON(w, 200, tool)
+	}
 }
 
 func (h *handler) upsertTool(w http.ResponseWriter, r *http.Request) {

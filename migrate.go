@@ -199,3 +199,29 @@ func migrateToolsTableToAcceptHarnessTools(db *sql.DB) (err error) {
 
 	return tx.Commit()
 }
+
+// addLastSeenAtColumnToTools adds tools.last_seen_at to a tools table made
+// before it, with the definition schema.sql gives it (a test holds the two
+// equal). Runs after the harness rebuild
+// (which makes the table from schema.sql and so already has the column) and
+// before schema.sql. Does nothing when there is no tools table yet or the
+// column is already there.
+func addLastSeenAtColumnToTools(db *sql.DB) error {
+	ctx := context.Background()
+	columns, err := tableColumns(ctx, db, "tools")
+	if err != nil {
+		return fmt.Errorf("read tools columns: %w", err)
+	}
+	if len(columns) == 0 {
+		return nil
+	}
+	for _, column := range columns {
+		if column == "last_seen_at" {
+			return nil
+		}
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE tools ADD COLUMN last_seen_at INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("add tools.last_seen_at: %w", err)
+	}
+	return nil
+}

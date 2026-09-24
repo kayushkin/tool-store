@@ -10,7 +10,8 @@
 --             harness runs it, tool-store records it and its enabled flag
 --
 -- A database made before the harness kind has a CHECK without it and no
--- harness columns; Open rebuilds that table (migrate.go).
+-- harness columns; Open rebuilds that table (migrate.go). A database made
+-- before last_seen_at gets the column added with its default (migrate.go).
 
 PRAGMA foreign_keys = ON;
 
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS tools (
     -- harness
     harness           TEXT NOT NULL DEFAULT '',    -- llm-bridge harness id, e.g. 'claude_code'
     harness_tool_name TEXT NOT NULL DEFAULT '',    -- the harness's own name, e.g. 'Read'
+    last_seen_at      INTEGER NOT NULL DEFAULT 0,  -- unix seconds a harness last reported it (POST /harness-tools/observed); 0 = never
 
     enabled         INTEGER NOT NULL DEFAULT 1,
     created_at      INTEGER NOT NULL,

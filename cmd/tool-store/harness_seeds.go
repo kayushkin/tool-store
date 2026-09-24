@@ -101,7 +101,10 @@ var codexTools = []harnessToolSeed{
 // operator chose to keep that default while making it switchable. An existing
 // row keeps its enabled flag and its description, so an operator's edits
 // survive a restart; its tags are refreshed from this file, so a tag added
-// here reaches rows seeded before it.
+// here reaches rows seeded before it. It reads and writes only the rows it
+// seeds: a row a harness reported (POST /harness-tools/observed) and this file
+// does not list keeps its enabled=false and its tags, and last_seen_at is
+// never written here.
 func seedHarnessTools(store *toolstore.Store) error {
 	for _, harness := range []struct {
 		id    string

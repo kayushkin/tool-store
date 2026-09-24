@@ -72,7 +72,7 @@ import toolstore "github.com/kayushkin/tool-store"
 
 - `Tool`, `Kind` (`mcp` | `cli` | `local` | `harness`), `Kinds`, `KindDescriptor`, `MCPSpec`, `CLISpec`, `LocalSpec`, `HarnessToolRowName`
 - `Open(dataDir) (*Store, error)` — opens the SQLite-backed store
-- `UpsertTool`, `GetTool`, `GetToolByName`, `ListTools`, `DeleteTool`, `SetEnabled`
+- `UpsertTool`, `GetTool`, `GetToolByName`, `ListTools`, `DeleteTool`, `SetEnabled`, `PatchTool`, `RecordObservedHarnessTools`
 - `RegisterHandlers(mux, store, HandlerOptions)` — wires the REST API onto an `*http.ServeMux`
 - `HandlerOptions` — pluggable callbacks: `InvokeLocal`, `ListLocals`. Both optional.
 
@@ -133,9 +133,10 @@ A set variable that begins `TOOL_STORE_ADDR` or `TOOL_STORE_DATA_DIR` and is not
 GET    /health
 GET    /settings                               every environment variable the process reads, and the value in force
 GET    /kinds                                  the tool kinds, each with a one-line description
-GET    /tools                                  ?kind=&harness=&tag=&q=&enabled=true&limit=  (a bare JSON array of Tool)
-POST   /tools                                  body: full Tool JSON (upsert by name)
+GET    /tools                                  ?kind=&harness=&tag=&q=&enabled=true&not_seen_since=&limit=  (a bare JSON array of Tool)
+POST   /tools                                  body: full Tool JSON (upsert by name; never writes last_seen_at)
 GET    /tools/{id}
+PATCH  /tools/{id}                             body: any of {"tags":[…],"description":"…","enabled":bool}; unknown field, null or {} is 400
 DELETE /tools/{id}
 POST   /tools/{id}/enable
 POST   /tools/{id}/disable
@@ -143,6 +144,8 @@ GET    /tools/by-name/{name}
 GET    /tools/by-name/{name}/spec              CLI/MCP launcher spec (for harnesses that run tools themselves); 409 for kind=harness
 POST   /tools/by-name/{name}/invoke            body: input JSON; only valid for kind=local or kind=cli; 409 for kind=harness
 GET    /locals                                 in-process registry (what's available to enable)
+
+POST   /harness-tools/observed                 body: {"harness":"claude_code","tool_names":["Read",…]} → {"created":[…],"seen":N}
 
 GET    /instances/{id}/tools                   tools opted-in for this harness instance
 POST   /instances/{id}/tools/by-name/{name}    enable a tool for this instance
@@ -163,7 +166,36 @@ The row's `name` must be `<harness>.<harness_tool_name>` (`claude_code.Read`, `c
 curl -s "http://localhost:8302/tools?kind=harness&harness=claude_code" | jq '.[] | {id, name, harness_tool_name, enabled, tags}'
 ```
 
-A database made before the harness kind is rebuilt on the first open (`migrate.go`): every row keeps its id, and the `instance_tools` rows with it.
+A database made before the harness kind is rebuilt on the first open (`migrate.go`): every row keeps its id, and the `instance_tools` rows with it. A database made before `last_seen_at` gets that column, 0 on every row.
+
+### Harness tools nobody registered
+
+A harness reports the built-in tools it offers when a session starts; llm-bridge-server forwards Claude Code's list to `POST /harness-tools/observed`:
+
+```bash
+curl -s -X POST http://localhost:8302/harness-tools/observed -H 'content-type: application/json' \
+  -d '{"harness":"claude_code","tool_names":["Read","Bash"]}'
+# {"created":[],"seen":2}
+```
+
+- A name with a row has its `last_seen_at` (unix seconds; 0 means never reported) set to now, and nothing else changes.
+- A name with no row gets one: `kind=harness`, **`enabled: false`**, tags `["unreviewed"]`, and a description naming the harness and the time. llm-bridge-server switches off every disabled harness tool in every session, so a tool nobody registered stays off until a person reviews it.
+- `harness` is passed through as sent (llm-bridge-server owns harness ids). An empty harness, an empty list, or a name that is empty, contains `.` or whitespace, or starts with `mcp__` is a 400 and nothing is written. A name another kind already holds is a 409.
+- One write transaction covers a report and each insert is `ON CONFLICT DO NOTHING`, so sessions reporting the same new name at once make one row and all get 200.
+
+The seeder writes only the names in `cmd/tool-store/harness_seeds.go`, so it never re-enables or re-tags a reported row. If a reported name is later added to the seeds, the row keeps its `enabled` and takes the seed's tags, as every existing seed row does.
+
+To review a tool, replace its tags and, if it should be on, enable it:
+
+```bash
+curl -s "http://localhost:8302/tools?kind=harness&tag=unreviewed"
+curl -s -X PATCH http://localhost:8302/tools/42 -H 'content-type: application/json' -d '{"tags":["read-only"]}'
+curl -s -X POST  http://localhost:8302/tools/42/enable
+```
+
+`GET /tools?kind=harness&not_seen_since=<unix>` lists harness rows whose `last_seen_at` is older than that, never-reported rows included; it is a 400 without `kind=harness`.
+
+`scripts/harness-tool-review.sh` is the daily report (scheduler shell job `harness-tool-review`, 08:30). It needs `TOOL_STORE_URL`, `NOTEBOARD_URL` and `codex` on `PATH`, and exits non-zero if it cannot reach any of them. It lists unreviewed rows, claude_code rows not reported for 14 days (a never-reported row only once reports have been arriving for 14 days), and features that appeared, disappeared or changed stage or default in `codex features list` since the last run. It keeps one open noteboard todo tagged `harness-tool-review`, rewriting its body while there is something to report, and keeps the last codex list in one workspace tagged `harness-tool-review-state`. It never creates tool-store rows for codex features.
 
 ### Per-instance opt-in
 

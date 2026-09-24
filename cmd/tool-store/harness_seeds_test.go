@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -92,5 +93,66 @@ func TestSeedHarnessToolsRefusesANameAnotherKindHolds(t *testing.T) {
 	}
 	if err := seedHarnessTools(store); err == nil {
 		t.Fatal("seeder took over a kind=local row")
+	}
+}
+
+func TestSeedHarnessToolsLeavesAToolAHarnessReportedAlone(t *testing.T) {
+	store := openSeedTestStore(t)
+	if err := seedHarnessTools(store); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordObservedHarnessTools(context.Background(), toolstore.ObservedHarnessToolsRequest{
+		Harness: harnessClaudeCode, ToolNames: []string{"Read", "Frobnicate"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reported, err := store.GetToolByName("claude_code.Frobnicate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := store.GetToolByName("claude_code.Read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seedHarnessTools(store); err != nil {
+		t.Fatal(err)
+	}
+	reportedAfter, err := store.GetToolByName("claude_code.Frobnicate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(reportedAfter, reported) {
+		t.Fatalf("seeding changed a row it does not seed:\nbefore %+v\nafter  %+v", reported, reportedAfter)
+	}
+	if reportedAfter.Enabled {
+		t.Fatal("seeding switched on a tool nobody reviewed")
+	}
+	readAfter, err := store.GetToolByName("claude_code.Read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readAfter.LastSeenAt == 0 || readAfter.LastSeenAt != read.LastSeenAt {
+		t.Fatalf("seeding touched last_seen_at: %d then %d", read.LastSeenAt, readAfter.LastSeenAt)
+	}
+}
+
+// A name a harness reported first and the seed file lists later keeps its
+// enabled=false and takes the seed's tags, as any existing seed row does.
+func TestSeedHarnessToolsKeepsAReportedRowOffWhenItsNameIsSeeded(t *testing.T) {
+	store := openSeedTestStore(t)
+	if _, err := store.RecordObservedHarnessTools(context.Background(), toolstore.ObservedHarnessToolsRequest{
+		Harness: harnessClaudeCode, ToolNames: []string{"Bash"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedHarnessTools(store); err != nil {
+		t.Fatal(err)
+	}
+	bash, err := store.GetToolByName("claude_code.Bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bash.Enabled || !reflect.DeepEqual(bash.Tags, []string{tagEffects, tagRunsCommands}) || bash.LastSeenAt == 0 {
+		t.Fatalf("seeded-after-report row: %+v", bash)
 	}
 }

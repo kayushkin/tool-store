@@ -47,7 +47,11 @@ func Open(dataDir string) (*Store, error) {
 		return nil, fmt.Errorf("mkdir %s: %w", dataDir, err)
 	}
 	dbPath := filepath.Join(dataDir, "tool-store.db")
-	db, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=on")
+	// _txlock=immediate takes the write lock when a transaction begins, and
+	// _busy_timeout makes a second writer wait for it rather than fail with
+	// "database is locked": two sessions reporting the same new harness tool at
+	// once must both succeed (RecordObservedHarnessTools).
+	db, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=on&_busy_timeout=10000&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -58,6 +62,10 @@ func Open(dataDir string) (*Store, error) {
 	if err := migrateToolsTableToAcceptHarnessTools(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("rebuild tools table for harness tools: %w", err)
+	}
+	if err := addLastSeenAtColumnToTools(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 	if _, err := db.Exec(schemaSQL); err != nil {
 		db.Close()
@@ -123,7 +131,9 @@ func validate(t *Tool) error {
 	return nil
 }
 
-// UpsertTool inserts or updates by name. Sets ID on insert.
+// UpsertTool inserts or updates by name. Sets ID on insert. It never writes
+// last_seen_at, which only RecordObservedHarnessTools sets; t.LastSeenAt is
+// ignored.
 func (s *Store) UpsertTool(t *Tool) (bool, error) {
 	if err := validate(t); err != nil {
 		return false, err
@@ -203,7 +213,7 @@ const toolCols = `tools.id, tools.name, tools.display_name, tools.description, t
 	tools.input_schema, tools.env_keys, tools.credentials, tools.tags,
 	tools.mcp_transport, tools.mcp_command, tools.mcp_args, tools.mcp_url,
 	tools.cli_command, tools.cli_args_template, tools.cli_working_dir, tools.cli_timeout_ms,
-	tools.local_symbol, tools.harness, tools.harness_tool_name,
+	tools.local_symbol, tools.harness, tools.harness_tool_name, tools.last_seen_at,
 	tools.enabled, tools.created_at, tools.updated_at`
 
 func scanTool(row interface{ Scan(...any) error }) (*Tool, error) {
@@ -221,7 +231,7 @@ func scanTool(row interface{ Scan(...any) error }) (*Tool, error) {
 		&t.ID, &t.Name, &t.DisplayName, &t.Description, &kind, &inputSchema, &envKeys, &credentials, &tags,
 		&mcpTransport, &mcpCommand, &mcpArgs, &mcpURL,
 		&cliCommand, &cliArgsTemplate, &cliWorkDir, &cliTimeoutMs,
-		&localSymbol, &t.Harness, &t.HarnessToolName, &enabled, &t.CreatedAt, &t.UpdatedAt,
+		&localSymbol, &t.Harness, &t.HarnessToolName, &t.LastSeenAt, &enabled, &t.CreatedAt, &t.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
@@ -274,8 +284,17 @@ type ListFilter struct {
 	EnabledOnly bool
 	Tag         string // matches if tags JSON array contains this string
 	Query       string // substring match on name/description
-	Limit       int
+	// NotSeenSince, when set, keeps only kind=harness rows whose last_seen_at
+	// is before it (unix seconds), including rows never reported (0). Nil
+	// means no filter.
+	NotSeenSince *int64
+	Limit        int
 }
+
+// ErrNotSeenSinceNeedsHarnessKind refuses a not_seen_since filter without
+// kind=harness: only harness tools are ever reported seen, so every other row
+// would match.
+var ErrNotSeenSinceNeedsHarnessKind = errors.New("not_seen_since filters kind=harness tools only; add kind=harness")
 
 func (s *Store) ListTools(f ListFilter) ([]Tool, error) {
 	q := `SELECT ` + toolCols + ` FROM tools WHERE 1=1`
@@ -295,6 +314,13 @@ func (s *Store) ListTools(f ListFilter) ([]Tool, error) {
 		// Cheap LIKE match on the JSON array; entries are quoted strings.
 		q += ` AND tags LIKE ?`
 		args = append(args, `%"`+f.Tag+`"%`)
+	}
+	if f.NotSeenSince != nil {
+		if f.Kind != KindHarness {
+			return nil, ErrNotSeenSinceNeedsHarnessKind
+		}
+		q += ` AND last_seen_at < ?`
+		args = append(args, *f.NotSeenSince)
 	}
 	if f.Query != "" {
 		like := "%" + f.Query + "%"

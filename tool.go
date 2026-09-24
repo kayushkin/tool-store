@@ -75,6 +75,10 @@ type Tool struct {
 
 	Harness         string `json:"harness,omitempty"`
 	HarnessToolName string `json:"harness_tool_name,omitempty"`
+	// LastSeenAt is when a harness last reported this tool in its session's
+	// tool list (POST /harness-tools/observed), in unix seconds; 0 means never
+	// reported. Only that route writes it: POST /tools and seeding leave it.
+	LastSeenAt int64 `json:"last_seen_at"`
 
 	MCP   *MCPSpec   `json:"mcp,omitempty"`
 	CLI   *CLISpec   `json:"cli,omitempty"`
