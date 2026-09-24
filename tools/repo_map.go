@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strings"
 
-	
 	"github.com/kayushkin/tool-store/schema"
 )
 

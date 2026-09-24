@@ -126,4 +126,3 @@ func seedLocalTools(store *toolstore.Store) error {
 	}
 	return nil
 }
-

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"strings"
 
-	
 	"github.com/kayushkin/tool-store/schema"
 )
 
@@ -107,7 +106,7 @@ func Browser(connection PinchtabConnection) Impl {
 		Filter string `json:"filter"`
 	}
 	return Impl{
-		Name:        "browser",
+		Name: "browser",
 		Description: `Control a browser via PinchTab. Actions:
 - navigate: go to a URL (requires "url")
 - snapshot: get accessibility tree with element refs (e0, e1...). Use filter="interactive" for clickable elements only.

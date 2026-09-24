@@ -102,12 +102,12 @@ func Shell() Impl {
 // truncateShellOutput applies intelligent truncation to shell output
 func truncateShellOutput(s string) string {
 	const (
-		maxLines     = 500
-		maxChars     = 50000
-		headLines    = 250
-		tailLines    = 200
-		headChars    = 25000
-		tailChars    = 20000
+		maxLines  = 500
+		maxChars  = 50000
+		headLines = 250
+		tailLines = 200
+		headChars = 25000
+		tailChars = 20000
 	)
 
 	// Check character limit first

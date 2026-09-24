@@ -25,7 +25,7 @@ func TruncateLines(output string, keepFirst, keepLast int) string {
 
 	// Build truncated output
 	var result strings.Builder
-	
+
 	// First N lines
 	for i := 0; i < keepFirst && i < totalLines; i++ {
 		result.WriteString(lines[i])

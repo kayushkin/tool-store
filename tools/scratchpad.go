@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	
 	"github.com/kayushkin/tool-store/schema"
 )
 

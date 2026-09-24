@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"strings"
 
-	
 	"github.com/kayushkin/tool-store/schema"
 )
 
@@ -75,15 +74,15 @@ func WebFetch() Impl {
 }
 
 var (
-	reScript    = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
-	reStyle     = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
-	reNav       = regexp.MustCompile(`(?is)<nav[^>]*>.*?</nav>`)
-	reHeader    = regexp.MustCompile(`(?is)<header[^>]*>.*?</header>`)
-	reFooter    = regexp.MustCompile(`(?is)<footer[^>]*>.*?</footer>`)
-	reTags      = regexp.MustCompile(`<[^>]+>`)
-	reSpaces    = regexp.MustCompile(`[ \t]+`)
-	reNewlines  = regexp.MustCompile(`\n{3,}`)
-	reEntities  = regexp.MustCompile(`&(amp|lt|gt|quot|apos|nbsp|#\d+|#x[0-9a-fA-F]+);`)
+	reScript   = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
+	reStyle    = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
+	reNav      = regexp.MustCompile(`(?is)<nav[^>]*>.*?</nav>`)
+	reHeader   = regexp.MustCompile(`(?is)<header[^>]*>.*?</header>`)
+	reFooter   = regexp.MustCompile(`(?is)<footer[^>]*>.*?</footer>`)
+	reTags     = regexp.MustCompile(`<[^>]+>`)
+	reSpaces   = regexp.MustCompile(`[ \t]+`)
+	reNewlines = regexp.MustCompile(`\n{3,}`)
+	reEntities = regexp.MustCompile(`&(amp|lt|gt|quot|apos|nbsp|#\d+|#x[0-9a-fA-F]+);`)
 )
 
 func extractText(html string) string {
