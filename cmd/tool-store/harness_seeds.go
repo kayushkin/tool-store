@@ -95,16 +95,15 @@ var codexTools = []harnessToolSeed{
 	{"web_search", "Search the web.", []string{tagEffects}},
 }
 
-// seedHarnessTools upserts the built-in tools of Claude Code and Codex as
-// kind=harness rows named <harness>.<harness_tool_name>. A new row is created
+// seedHarnessTools creates the built-in tools of Claude Code and Codex that
+// are missing, as kind=harness rows named <harness>.<harness_tool_name>,
 // enabled — the harness offers these tools unless told otherwise, and the
-// operator chose to keep that default while making it switchable. An existing
-// row keeps its enabled flag and its description, so an operator's edits
-// survive a restart; its tags are refreshed from this file, so a tag added
-// here reaches rows seeded before it. It reads and writes only the rows it
-// seeds: a row a harness reported (POST /harness-tools/observed) and this file
-// does not list keeps its enabled=false and its tags, and last_seen_at is
-// never written here.
+// operator chose to keep that default while making it switchable. A row that
+// already exists is left exactly as it is: the database owns a tool's tags,
+// enabled flag and description, and this file only fills an empty table. So
+// a change to a seed here reaches a new database only; change a live row with
+// PATCH /tools/{id}. A row a harness reported first (POST
+// /harness-tools/observed) keeps its enabled=false and its unreviewed tag.
 func seedHarnessTools(store *toolstore.Store) error {
 	for _, harness := range []struct {
 		id    string
@@ -129,14 +128,12 @@ func seedHarnessTools(store *toolstore.Store) error {
 				if existing.Kind != toolstore.KindHarness {
 					return fmt.Errorf("harness tool %s: a kind=%s row already holds that name", t.Name, existing.Kind)
 				}
-				t.Enabled = existing.Enabled
-				t.Description = existing.Description
-				t.DisplayName = existing.DisplayName
+				continue
 			case !errors.Is(err, toolstore.ErrNotFound):
 				return fmt.Errorf("lookup harness tool %s: %w", t.Name, err)
 			}
 			if _, err := store.UpsertTool(&t); err != nil {
-				return fmt.Errorf("upsert harness tool %s: %w", t.Name, err)
+				return fmt.Errorf("create harness tool %s: %w", t.Name, err)
 			}
 		}
 	}

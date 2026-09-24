@@ -48,7 +48,7 @@ A tool registered in tool-store can be one of four **kinds**, each with a differ
 | `mcp`   | An external MCP server (stdio / http / sse) | Not invoked here — clients fetch the launcher spec via `/tools/by-name/{name}/spec` and spawn it themselves (e.g. Claude Code via `--mcp-config`) |
 | `harness` | A built-in tool of an agent harness (Claude Code's `Read`, Codex's `shell_tool`) | Not run here, and never — the harness runs it. tool-store records it and its `enabled` flag so a caller can switch it off. `/invoke` and `/spec` answer 409, `/provision` refuses it |
 
-tool-store seeds its own registry on startup with every in-process tool the binary ships and a short list of MCP servers, and every such new row starts **disabled**. It also seeds the built-in tools of Claude Code and Codex as `kind=harness` rows, and those start **enabled**, because the harness offers them unless told otherwise; an existing harness row keeps its `enabled` flag and its description, and takes its tags from `cmd/tool-store/harness_seeds.go`. Operators (or eventually a UI) explicitly enable a tool when they want it. Existing rows preserve whatever enabled state they have, so a deliberate enable or disable survives restarts. Discovery via `GET /locals` shows what's available regardless of registration state.
+tool-store seeds its own registry on startup with every in-process tool the binary ships and a short list of MCP servers, and every such new row starts **disabled**. It also seeds the built-in tools of Claude Code and Codex as `kind=harness` rows, and those start **enabled**, because the harness offers them unless told otherwise; the seeder only creates harness rows that are missing and never changes one that exists, so the database owns each harness tool's tags, `enabled` flag and description; change a live row with `PATCH /tools/{id}`. Operators (or eventually a UI) explicitly enable a tool when they want it. Existing rows preserve whatever enabled state they have, so a deliberate enable or disable survives restarts. Discovery via `GET /locals` shows what's available regardless of registration state.
 
 ## What you get
 
@@ -183,7 +183,7 @@ curl -s -X POST http://localhost:8302/harness-tools/observed -H 'content-type: a
 - `harness` is passed through as sent (llm-bridge-server owns harness ids). An empty harness, an empty list, or a name that is empty, contains `.` or whitespace, or starts with `mcp__` is a 400 and nothing is written. A name another kind already holds is a 409.
 - One write transaction covers a report and each insert is `ON CONFLICT DO NOTHING`, so sessions reporting the same new name at once make one row and all get 200.
 
-The seeder writes only the names in `cmd/tool-store/harness_seeds.go`, so it never re-enables or re-tags a reported row. If a reported name is later added to the seeds, the row keeps its `enabled` and takes the seed's tags, as every existing seed row does.
+The seeder only creates missing rows from `cmd/tool-store/harness_seeds.go`, so it never re-enables or re-tags any existing row, reported or seeded. If a reported name is later added to the seeds, the row keeps its `enabled=false` and its `unreviewed` tag until a person reviews it.
 
 To review a tool, replace its tags and, if it should be on, enable it:
 

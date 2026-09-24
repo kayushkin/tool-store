@@ -62,7 +62,7 @@ func TestSeedHarnessToolsTagsExactlyTheShellRunners(t *testing.T) {
 	}
 }
 
-func TestSeedHarnessToolsKeepsEnabledAndDescriptionAndRefreshesTags(t *testing.T) {
+func TestSeedHarnessToolsLeavesAnExistingRowExactlyAsItIs(t *testing.T) {
 	store := openSeedTestStore(t)
 	stale := &toolstore.Tool{
 		Name: "claude_code.Bash", Kind: toolstore.KindHarness, Harness: harnessClaudeCode, HarnessToolName: "Bash",
@@ -81,8 +81,8 @@ func TestSeedHarnessToolsKeepsEnabledAndDescriptionAndRefreshesTags(t *testing.T
 	if got.ID != stale.ID || got.Enabled || got.Description != "operator's words" {
 		t.Fatalf("seeder overwrote what it must keep: %+v", got)
 	}
-	if !reflect.DeepEqual(got.Tags, []string{tagEffects, tagRunsCommands}) {
-		t.Fatalf("tags not refreshed: %v", got.Tags)
+	if !reflect.DeepEqual(got.Tags, []string{"old"}) {
+		t.Fatalf("seeder rewrote the tags the database holds: %v", got.Tags)
 	}
 }
 
@@ -137,7 +137,7 @@ func TestSeedHarnessToolsLeavesAToolAHarnessReportedAlone(t *testing.T) {
 }
 
 // A name a harness reported first and the seed file lists later keeps its
-// enabled=false and takes the seed's tags, as any existing seed row does.
+// enabled=false and its unreviewed tag: the seed file does not review it.
 func TestSeedHarnessToolsKeepsAReportedRowOffWhenItsNameIsSeeded(t *testing.T) {
 	store := openSeedTestStore(t)
 	if _, err := store.RecordObservedHarnessTools(context.Background(), toolstore.ObservedHarnessToolsRequest{
@@ -152,7 +152,7 @@ func TestSeedHarnessToolsKeepsAReportedRowOffWhenItsNameIsSeeded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bash.Enabled || !reflect.DeepEqual(bash.Tags, []string{tagEffects, tagRunsCommands}) || bash.LastSeenAt == 0 {
+	if bash.Enabled || !reflect.DeepEqual(bash.Tags, []string{"unreviewed"}) || bash.LastSeenAt == 0 {
 		t.Fatalf("seeded-after-report row: %+v", bash)
 	}
 }
