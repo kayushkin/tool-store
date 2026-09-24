@@ -85,6 +85,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import tree_hold  # noqa: E402  vendored; see tree_hold.py on keeping copies identical
+
 REPO = Path(__file__).resolve().parent.parent
 
 
@@ -350,7 +353,31 @@ def _sabotage_session(targets, packages):
     Every mode shares this — the 62nd pass's point was that a `finally` covers
     the signal you press by hand and misses the ones an unattended run receives,
     so a second mode with its own hand-rolled cleanup would reopen exactly that.
+
+    It also takes the tree exclusively first (card `d869d2be`). A verdict here is
+    the SUITE'S exit code, which belongs to the whole tree, so a second run
+    mutating the same files hands this one a red suite it did not cause and this
+    one scores it CAUGHT: a collision inflates the score. The hold refuses rather
+    than waits, and exits non-zero so a refusal cannot read as a measurement.
+    It sits here and not in score() because two of this repo's three scorers
+    call run_cases() directly, and it is not re-entrant, so it must be taken at
+    exactly one level. The `git status` check below cannot stand in for it: the
+    other run restores each file between cases, so the tree looks clean exactly
+    when trusting it is most dangerous.
     """
+    with tree_hold.exclusive_hold_on_tree(
+            REPO, purpose=os.path.basename(sys.argv[0] or "sabotage")) as refusal:
+        if refusal:
+            sys.exit("REFUSING: " + refusal)
+        with _sabotage_session_on_a_held_tree(targets, packages) as session:
+            yield session
+
+
+@contextlib.contextmanager
+def _sabotage_session_on_a_held_tree(targets, packages):
+    """The session itself, on a tree this process already holds. Enter
+    _sabotage_session instead: on its own this will mutate a tree another run
+    is mutating, which is what the hold exists to stop."""
     rels = [str(t.relative_to(REPO)) for t in targets]
 
     dirty = subprocess.run(["git", "status", "--porcelain"] + rels,
