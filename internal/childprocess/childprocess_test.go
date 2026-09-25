@@ -110,6 +110,9 @@ func TestWaitReturnsWhenABackgroundProcessHoldsTheOutputPipe(t *testing.T) {
 	case <-time.After(WaitDelayAfterExit + 5*time.Second):
 		t.Fatal("CombinedOutput never returned; a background process held the pipe open")
 	}
+	// The backgrounded sleep is this test's subject and is still running: the
+	// command was never cancelled, so nothing else will stop it.
+	defer killProcessGroup(command.Process)
 	if !errors.Is(err, exec.ErrWaitDelay) {
 		t.Fatalf("want exec.ErrWaitDelay, got %v", err)
 	}
@@ -161,17 +164,20 @@ func waitForRecordedPid(t *testing.T, pidFile string) int {
 	return 0
 }
 
-// waitForProcessToExit reports whether the process was still alive when the
-// timeout ran out. Signal 0 checks for existence without delivering anything.
+// waitForProcessToExit reports whether the process was still running when the
+// timeout ran out. A killed process that nobody has reaped yet counts as
+// exited: the grandchildren here are orphans, so reaping is up to whichever
+// process adopted them, and on a loaded host that can take longer than the
+// timeout.
 func waitForProcessToExit(pid int, timeout time.Duration) (stillAlive bool) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); err != nil {
+		if !processIsRunning(pid) {
 			return false
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	return syscall.Kill(pid, 0) == nil
+	return processIsRunning(pid)
 }
 
 // Cancellation asks before it insists: the group gets SIGINT, so a command that
