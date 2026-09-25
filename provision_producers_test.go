@@ -155,13 +155,13 @@ func TestProvisionRefusesARequestNamingBothSources(t *testing.T) {
 	_, err := Provision(context.Background(), s, ProvisionRequest{
 		Tools: []string{"remote-mcp"}, InstanceID: "inst-1",
 	}, nil)
-	requireErrorNaming(t, err, "resolveNames/both-sources-rejected", "has both tools and instance_id")
+	requireErrorNaming(t, err, "resolveNames/both-sources-rejected", "names more than one of tools, tool_ids and instance_id")
 }
 
 func TestProvisionRefusesARequestNamingNeitherSource(t *testing.T) {
 	s := openProvTest(t)
 	_, err := Provision(context.Background(), s, ProvisionRequest{}, nil)
-	requireErrorNaming(t, err, "resolveNames/neither-source-rejected", "at least one tool name or an instance_id is required")
+	requireErrorNaming(t, err, "resolveNames/neither-source-rejected", "one of tools, tool_ids or instance_id is required")
 }
 
 // An instance whose opt-in list cannot be read must not look like an instance
