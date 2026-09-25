@@ -20,8 +20,8 @@ import (
 // before the handler runs, so the reply mentions no provider at all. An
 // unknown provider is 404 with a JSON {"error": ...} body; a bad bearer is 401.
 //
-// resolveFromAuthStore reads AUTH_STORE_URL and AUTH_STORE_TOKEN once, when
-// the resolver is constructed, so each test sets them before calling it.
+// resolveFromAuthStore takes auth-store's URL and bearer when the resolver is
+// constructed, so each test hands it the stub's.
 
 type capture struct {
 	method string
@@ -48,9 +48,7 @@ func newRecordingAuthStore(t *testing.T, status int, body string) (func(context.
 		w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
-	t.Setenv("AUTH_STORE_URL", srv.URL)
-	t.Setenv("AUTH_STORE_TOKEN", "probe-token")
-	return resolveFromAuthStore(), got
+	return resolveFromAuthStore(srv.URL, "probe-token"), got
 }
 
 // resolveFixtureFromRealAuthStore is a byte-for-byte capture of what a real
