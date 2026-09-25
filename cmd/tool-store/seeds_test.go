@@ -191,10 +191,13 @@ func TestSeedMCPToolsPreservesAnOperatorsEnabledState(t *testing.T) {
 }
 
 // Both seeds run on every boot, so running them twice must not duplicate rows
-// or fail on the second pass.
+// or fail on the second pass. The second pass is compared against the first
+// rather than against a count of seeds, which would go stale whenever the
+// curated list grows.
 func TestSeedingTwiceIsIdempotent(t *testing.T) {
 	s := openSeedTestStore(t)
 
+	rowsAfterPass := make([]int, 0, 2)
 	for pass := 1; pass <= 2; pass++ {
 		if err := seedLocalTools(s); err != nil {
 			t.Fatalf("pass %d seedLocalTools: %v", pass, err)
@@ -202,14 +205,19 @@ func TestSeedingTwiceIsIdempotent(t *testing.T) {
 		if err := seedMCPTools(s); err != nil {
 			t.Fatalf("pass %d seedMCPTools: %v", pass, err)
 		}
+		rows, err := s.ListTools(toolstore.ListFilter{})
+		if err != nil {
+			t.Fatalf("pass %d list tools: %v", pass, err)
+		}
+		rowsAfterPass = append(rowsAfterPass, len(rows))
 	}
 
-	after, err := s.ListTools(toolstore.ListFilter{})
-	if err != nil {
-		t.Fatalf("list tools: %v", err)
+	if rowsAfterPass[0] <= len(tools.All()) {
+		t.Fatalf("the first pass wrote %d rows, want more than the %d local tools — the MCP seed wrote nothing",
+			rowsAfterPass[0], len(tools.All()))
 	}
-	want := len(tools.All()) + 3
-	if len(after) != want {
-		t.Errorf("after seeding twice: %d rows, want %d — the seed is not idempotent", len(after), want)
+	if rowsAfterPass[1] != rowsAfterPass[0] {
+		t.Errorf("after seeding twice: %d rows, after once: %d — the seed is not idempotent",
+			rowsAfterPass[1], rowsAfterPass[0])
 	}
 }
