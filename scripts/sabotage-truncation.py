@@ -119,8 +119,13 @@ HELPER_CASES = [
 # any of these, that tool is unpinned no matter how well the helper scores.
 CALL_SITES = {
     REPO / "tools" / "web_fetch.go": [
+        # 0b81c49 (landed on main 2026-09-25) counts max_chars in characters,
+        # and the cut is no longer behind a length check, so the byte cut is
+        # clamped: a bare content[:maxChars] would panic on a short page and
+        # score CAUGHT for a reason that has nothing to do with bytes.
         Case("web_fetch byte-cuts fetched page text again",
-             [("schema.TruncateAtRuneBoundary(content, maxChars)", "content[:maxChars]")]),
+             [("truncateToRuneCount(content, maxChars)",
+               "content[:min(len(content), maxChars)]")]),
         Case("web_fetch's default page budget drifts by one",
              [("\t\t\t\tmaxChars = 50000", "\t\t\t\tmaxChars = 50001")]),
         Case("web_fetch treats a requested budget of 1 as unset",
@@ -181,12 +186,19 @@ CALL_SITES = {
              [("schema.TruncateAtRuneBoundary(output, 500)", "schema.TruncateAtRuneBoundary(output, 501)")]),
     ],
     REPO / "tools" / "shell.go": [
+        # 46b3110 (landed on main 2026-09-25) moved every budget in
+        # truncateShellOutput from bytes to characters. The head and tail cuts
+        # are headCharacters/tailCharacters now; s is over maxChars characters
+        # by the time either runs, so the byte slices below cannot go out of
+        # range. The omitted count is correctly derived from the caps now,
+        # because each cut keeps exactly its budget in characters — the
+        # mistake left to make is counting the total in bytes.
         Case("shell_commands byte-cuts the head again",
-             [("schema.TruncateAtRuneBoundary(s, headChars)", "s[:headChars]")]),
+             [("headCharacters(s, headChars)", "s[:headChars]")]),
         Case("shell_commands byte-cuts the tail again",
-             [("schema.SuffixAtRuneBoundary(s, tailChars)", "s[len(s)-tailChars:]")]),
-        Case("the omitted-bytes count is derived from the caps, not what was kept",
-             [("omitted := len(s) - len(head) - len(tail)",
+             [("tailCharacters(s, tailChars)", "s[len(s)-tailChars:]")]),
+        Case("the omitted count is in bytes, not characters",
+             [("omitted := totalChars - headChars - tailChars",
                "omitted := len(s) - headChars - tailChars")]),
         Case("shell: the character ceiling drifts by one",
              [("\t\tmaxChars  = 50000", "\t\tmaxChars  = 50001")]),
@@ -201,9 +213,9 @@ CALL_SITES = {
         Case("shell: the tail line budget drifts by one",
              [("\t\ttailLines = 200", "\t\ttailLines = 201")]),
         Case("shell: output of exactly the character ceiling is truncated",
-             [("if len(s) > maxChars {", "if len(s) >= maxChars {")]),
+             [("if totalChars > maxChars {", "if totalChars >= maxChars {")]),
         Case("shell: output of exactly head+tail is split instead of returned whole",
-             [("if len(s) <= headChars+tailChars {", "if len(s) < headChars+tailChars {")],
+             [("if totalChars <= headChars+tailChars {", "if totalChars < headChars+tailChars {")],
              expected_unnoticed="the branch is unreachable, so no fixture can reach the comparison. "
                                 "It is guarded by len(s) > maxChars, and headChars+tailChars is 45000 "
                                 "against a ceiling of 50000 — any string that gets this far is already "
