@@ -39,13 +39,17 @@ type recordedRequest struct {
 // fakeScheduler serves the scheduler's two write verbs and its two read routes
 // over a job it holds — POST /api/jobs, PATCH /api/jobs/{id}, GET /api/jobs and
 // GET /api/jobs/{id}. On the write verbs it applies only the fields it was told
-// to honour and silently keeps its own value for the rest, which is what the
-// deployed scheduler does.
+// to honour and silently keeps its own value for the rest. That is what
+// schedulers built before 863868a did; since then PATCH takes all thirteen
+// fields and answers an unknown one with a 400.
 //
-// It also models the create decoder's one refusal: the real POST struct has no
-// enabled field and decodes strictly, so a request carrying that key is a 400
-// rather than a disabled job. A tool that starts sending it fails here loudly
-// instead of silently producing a live cron job the caller believes is off.
+// It also models the create decoder's refusal of enabled, as the deployed
+// scheduler (4f2b584) has it: the POST struct has no enabled field and decodes
+// strictly, so a request carrying that key is a 400 rather than a disabled job.
+// A tool that starts sending it fails here loudly instead of silently producing
+// a live cron job the caller believes is off. ⚠️ scheduler 271998d, on main but
+// not deployed as of 2026-09-27, adds enabled to POST; once it is live this
+// refusal is stale and the tool should pass enabled through.
 //
 // The read routes serve `job` plus any alsoListed jobs. They exist because the
 // read paths are a third authoring of the same field list and were measured to
