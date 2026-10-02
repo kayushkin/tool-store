@@ -58,7 +58,7 @@ func agentJobWithEveryField() Job {
 		Type:         "agent",
 		Agent:        "claude-code",
 		Prompt:       "summarise yesterday",
-		Model:        "opus",
+		ModelRole:    "balanced",
 		Orchestrator: "claude-code",
 		SessionID:    "sess-7",
 		WorkspaceID:  "ws-42",

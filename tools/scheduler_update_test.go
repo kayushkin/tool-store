@@ -105,8 +105,8 @@ func fakeScheduler(t *testing.T, job Job, honoured []string, alsoListed ...Job) 
 				job.Agent = value.(string)
 			case "prompt":
 				job.Prompt = value.(string)
-			case "model":
-				job.Model = value.(string)
+			case "model_role":
+				job.ModelRole = value.(string)
 			case "orchestrator":
 				job.Orchestrator = value.(string)
 			case "session_id":

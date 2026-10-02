@@ -23,7 +23,7 @@ type Job struct {
 	Type         string     `json:"type"`     // "shell" or "agent"
 	Agent        string     `json:"agent,omitempty"`
 	Prompt       string     `json:"prompt,omitempty"`
-	Model        string     `json:"model,omitempty"`
+	ModelRole    string     `json:"model_role,omitempty"`   // model-store role the session starts on (type=agent)
 	Orchestrator string     `json:"orchestrator,omitempty"` // "claude-code", "inber", etc.
 	SessionID    string     `json:"session_id,omitempty"`   // session to resume
 	WorkspaceID  string     `json:"workspace_id,omitempty"` // noteboard workspace holding durable memory
@@ -54,7 +54,7 @@ type schedulerInput struct {
 	Type         *string `json:"type,omitempty"`            // "shell" or "agent" for create
 	Agent        *string `json:"agent,omitempty"`           // agent name for create (type=agent)
 	Prompt       *string `json:"prompt,omitempty"`          // prompt text for create (type=agent)
-	Model        *string `json:"model,omitempty"`           // model override for create (type=agent)
+	ModelRole    *string `json:"model_role,omitempty"`      // model-store role the session starts on (type=agent)
 	Orchestrator *string `json:"orchestrator,omitempty"`    // "claude-code", "inber", etc. for create (type=agent)
 	SessionID    *string `json:"session_id,omitempty"`      // session to resume for create (type=agent)
 	WorkspaceID  *string `json:"workspace_id,omitempty"`    // noteboard workspace holding the job's durable memory (type=agent)
@@ -92,7 +92,7 @@ func Scheduler(connection SchedulerConnection) Impl {
 			"type":            schema.Str("Job type: 'shell' or 'agent' (default: shell)"),
 			"agent":           schema.Str("Agent name (required for create with type=agent)"),
 			"prompt":          schema.Str("Prompt text (required for create with type=agent)"),
-			"model":           schema.Str("Model override (optional for type=agent)"),
+			"model_role":      schema.Str("Model-store role the session starts on, such as 'balanced' (model-store GET /api/roles lists them); not a model id. Optional, type=agent only; empty uses the scheduler's agent_job_model_role setting"),
 			"orchestrator":    schema.Str("Orchestrator name: 'claude-code', 'inber', etc. (default: claude-code)"),
 			"session_id":      schema.Str("Session ID to resume (empty for new session)"),
 			"workspace_id":    schema.Str("Noteboard workspace holding the job's durable memory (type=agent)"),
@@ -392,7 +392,7 @@ var schedulerJobFields = []schedulerJobField{
 	{"command", "Command", false, func(in schedulerInput) (any, bool) { return valueOf(in.Command) }, func(j Job) any { return j.Command }},
 	{"agent", "Agent", false, func(in schedulerInput) (any, bool) { return valueOf(in.Agent) }, func(j Job) any { return j.Agent }},
 	{"prompt", "Prompt", false, func(in schedulerInput) (any, bool) { return valueOf(in.Prompt) }, func(j Job) any { return j.Prompt }},
-	{"model", "Model", false, func(in schedulerInput) (any, bool) { return valueOf(in.Model) }, func(j Job) any { return j.Model }},
+	{"model_role", "Model role", false, func(in schedulerInput) (any, bool) { return valueOf(in.ModelRole) }, func(j Job) any { return j.ModelRole }},
 	{"orchestrator", "Orchestrator", false, func(in schedulerInput) (any, bool) { return valueOf(in.Orchestrator) }, func(j Job) any { return j.Orchestrator }},
 	{"session_id", "Session ID", false, func(in schedulerInput) (any, bool) { return valueOf(in.SessionID) }, func(j Job) any { return j.SessionID }},
 	{"workspace_id", "Workspace ID", false, func(in schedulerInput) (any, bool) { return valueOf(in.WorkspaceID) }, func(j Job) any { return j.WorkspaceID }},

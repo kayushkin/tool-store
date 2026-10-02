@@ -19,7 +19,7 @@ import (
 // Every field POST /api/jobs decodes, per scheduler/internal/api/api.go:126-144.
 var fieldsTheSchedulerStoresOnCreate = []string{
 	"name", "description", "schedule", "command", "type",
-	"agent", "prompt", "model", "orchestrator", "session_id",
+	"agent", "prompt", "model_role", "orchestrator", "session_id",
 	"workspace_id", "timeout_seconds", "enabled",
 }
 
@@ -258,5 +258,33 @@ func TestCreateForwardsTheDefaultedTypeAndReportsIt(t *testing.T) {
 	}
 	if !strings.Contains(report, "Type: shell") {
 		t.Errorf("the report does not name the type the job was given:\n%s", report)
+	}
+}
+
+// scheduler 89b1712 renamed the job field `model` to `model_role`, and its
+// POST decoder is strict: measured live 2026-10-02, a create carrying
+// "model":"x" answers 400 `json: unknown field "model"`. This tool kept
+// sending `model`, so any create that named a model failed outright.
+func TestCreateSendsTheModelRoleUnderTheKeyTheSchedulerDecodes(t *testing.T) {
+	baseURL, lastRequest := fakeScheduler(t, jobAsCreated(), fieldsTheSchedulerStoresOnCreate)
+
+	_, err := handleCreate(context.Background(), baseURL, "", schedulerInput{
+		Name:      stringPointer("nightly summary"),
+		Schedule:  stringPointer("0 8 * * *"),
+		Type:      stringPointer("agent"),
+		Agent:     stringPointer("claude-code"),
+		Prompt:    stringPointer("summarise yesterday"),
+		ModelRole: stringPointer("balanced"),
+	})
+	if err != nil {
+		t.Fatalf("handleCreate returned an error: %s", err)
+	}
+
+	sent := lastRequest().Body
+	if got := sent["model_role"]; got != "balanced" {
+		t.Errorf("the create request sent model_role=%v, want \"balanced\"", got)
+	}
+	if _, present := sent["model"]; present {
+		t.Errorf("the create request still carries \"model\", which the scheduler answers with a 400")
 	}
 }
