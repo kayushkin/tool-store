@@ -97,7 +97,7 @@ func Scheduler(connection SchedulerConnection) Impl {
 			"session_id":      schema.Str("Session ID to resume (empty for new session)"),
 			"workspace_id":    schema.Str("Noteboard workspace holding the job's durable memory (type=agent)"),
 			"timeout_seconds": schema.Integer("Per-job wall-clock cap in seconds; 0 means the scheduler default"),
-			"enabled":         schema.Bool("Enable/disable job (update only; the scheduler always creates a job enabled, so this is ignored on create)"),
+			"enabled":         schema.Bool("Enable/disable job; on create, false makes the job switched off from the start (default: enabled)"),
 		}),
 		Run: func(ctx context.Context, raw string) (string, error) {
 			in, err := schema.Parse[schedulerInput](raw)
@@ -237,9 +237,6 @@ func handleCreate(ctx context.Context, baseURL, token string, in schedulerInput)
 	reqBody := map[string]interface{}{}
 	var requestedFields []requestedChange
 	for _, field := range schedulerJobFields {
-		if !field.AcceptedOnCreate {
-			continue
-		}
 		value, set := field.ReadRequested(normalisedInput)
 		if !set {
 			continue
@@ -277,7 +274,7 @@ func handleCreate(ctx context.Context, baseURL, token string, in schedulerInput)
 		return fmt.Sprintf("error parsing response: %s", err), nil
 	}
 
-	return describeCreateOutcome(job, requestedFields, in.Enabled != nil), nil
+	return describeCreateOutcome(job, requestedFields), nil
 }
 
 // describeCreateOutcome reports the created job and, for each field the caller
@@ -289,7 +286,7 @@ func handleCreate(ctx context.Context, baseURL, token string, in schedulerInput)
 // them. workspace_id is the one with teeth: an agent job's durable memory is
 // bound by that field, and a job that lost it reads as a job that was never
 // given one.
-func describeCreateOutcome(job Job, requestedFields []requestedChange, callerNamedEnabled bool) string {
+func describeCreateOutcome(job Job, requestedFields []requestedChange) string {
 	stored, dropped := partitionByWhatTheServerStored(job, requestedFields)
 
 	result := fmt.Sprintf("Created job %d: %s\nSchedule: %s\nType: %s\nEnabled: %t\n",
@@ -305,10 +302,6 @@ func describeCreateOutcome(job Job, requestedFields []requestedChange, callerNam
 	result += fmt.Sprintf("Stored: %s\n", strings.Join(stored, ", "))
 	if len(dropped) > 0 {
 		result += fmt.Sprintf("NOT stored: %s\n", strings.Join(dropped, ", "))
-	}
-
-	if callerNamedEnabled {
-		result += fmt.Sprintf("Note: enabled was not sent — the scheduler's create request has no such field and a new job is always inserted enabled. The job above is Enabled: %t. Use action=update to change it.\n", job.Enabled)
 	}
 
 	return strings.TrimRight(result, "\n")
@@ -348,7 +341,7 @@ func handleGet(ctx context.Context, baseURL, token string, id int64) (string, er
 }
 
 // schedulerJobField is one field of a scheduler job as this tool handles it:
-// the wire name, which of the two write verbs the server decodes it on, the
+// the wire name, the
 // reader that pulls the value off the tool's input, and the reader that pulls
 // the same field back off the job the server echoes in its reply.
 //
@@ -370,10 +363,6 @@ type schedulerJobField struct {
 	Name string
 	// Label is how the read paths name this field to the caller.
 	Label string
-	// AcceptedOnCreate records whether POST /api/jobs decodes this field.
-	// Twelve of the thirteen are accepted on both verbs; see the enabled row
-	// for the one that is not.
-	AcceptedOnCreate bool
 	// ShownWhenZero prints the field on the read paths even when it holds its
 	// zero value. Every job has a name, a schedule, a type and an enabled
 	// flag, so a blank one is itself worth seeing. Every other field is
@@ -391,29 +380,23 @@ type schedulerJobField struct {
 // and a job created with a description, a timeout or a workspace lost all
 // three on the way out.
 var schedulerJobFields = []schedulerJobField{
-	{"name", "Name", true, true, func(in schedulerInput) (any, bool) { return valueOf(in.Name) }, func(j Job) any { return j.Name }},
-	{"description", "Description", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.Description) }, func(j Job) any { return j.Description }},
-	{"schedule", "Schedule", true, true, func(in schedulerInput) (any, bool) { return valueOf(in.Schedule) }, func(j Job) any { return j.Schedule }},
-	{"type", "Type", true, true, func(in schedulerInput) (any, bool) { return valueOf(in.Type) }, func(j Job) any { return j.Type }},
+	{"name", "Name", true, func(in schedulerInput) (any, bool) { return valueOf(in.Name) }, func(j Job) any { return j.Name }},
+	{"description", "Description", false, func(in schedulerInput) (any, bool) { return valueOf(in.Description) }, func(j Job) any { return j.Description }},
+	{"schedule", "Schedule", true, func(in schedulerInput) (any, bool) { return valueOf(in.Schedule) }, func(j Job) any { return j.Schedule }},
+	{"type", "Type", true, func(in schedulerInput) (any, bool) { return valueOf(in.Type) }, func(j Job) any { return j.Type }},
+	// Sent on create since scheduler 271998d, which inserts a job with
+	// enabled:false switched off. Earlier builds answered the key with a 400,
+	// so this tool used to drop it and the caller got a live job.
+	{"enabled", "Enabled", true, func(in schedulerInput) (any, bool) { return valueOf(in.Enabled) }, func(j Job) any { return j.Enabled }},
 
-	// Not accepted on create, and sending it anyway is worse than dropping
-	// it. The scheduler's create request struct has no enabled field at all
-	// and db.go sets Enabled = true on insert, so the key cannot disable a
-	// new job on any build. On HEAD the create decoder is strict, which
-	// turns the key into a 400; on the deployed binary it is swallowed. The
-	// create path reports the omission rather than sending it — a caller who
-	// asked for a disabled job and was not told otherwise would walk away
-	// believing a live cron job was off.
-	{"enabled", "Enabled", false, true, func(in schedulerInput) (any, bool) { return valueOf(in.Enabled) }, func(j Job) any { return j.Enabled }},
-
-	{"command", "Command", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.Command) }, func(j Job) any { return j.Command }},
-	{"agent", "Agent", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.Agent) }, func(j Job) any { return j.Agent }},
-	{"prompt", "Prompt", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.Prompt) }, func(j Job) any { return j.Prompt }},
-	{"model", "Model", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.Model) }, func(j Job) any { return j.Model }},
-	{"orchestrator", "Orchestrator", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.Orchestrator) }, func(j Job) any { return j.Orchestrator }},
-	{"session_id", "Session ID", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.SessionID) }, func(j Job) any { return j.SessionID }},
-	{"workspace_id", "Workspace ID", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.WorkspaceID) }, func(j Job) any { return j.WorkspaceID }},
-	{"timeout_seconds", "Timeout (seconds)", true, false, func(in schedulerInput) (any, bool) { return valueOf(in.TimeoutSecs) }, func(j Job) any { return j.TimeoutSecs }},
+	{"command", "Command", false, func(in schedulerInput) (any, bool) { return valueOf(in.Command) }, func(j Job) any { return j.Command }},
+	{"agent", "Agent", false, func(in schedulerInput) (any, bool) { return valueOf(in.Agent) }, func(j Job) any { return j.Agent }},
+	{"prompt", "Prompt", false, func(in schedulerInput) (any, bool) { return valueOf(in.Prompt) }, func(j Job) any { return j.Prompt }},
+	{"model", "Model", false, func(in schedulerInput) (any, bool) { return valueOf(in.Model) }, func(j Job) any { return j.Model }},
+	{"orchestrator", "Orchestrator", false, func(in schedulerInput) (any, bool) { return valueOf(in.Orchestrator) }, func(j Job) any { return j.Orchestrator }},
+	{"session_id", "Session ID", false, func(in schedulerInput) (any, bool) { return valueOf(in.SessionID) }, func(j Job) any { return j.SessionID }},
+	{"workspace_id", "Workspace ID", false, func(in schedulerInput) (any, bool) { return valueOf(in.WorkspaceID) }, func(j Job) any { return j.WorkspaceID }},
+	{"timeout_seconds", "Timeout (seconds)", false, func(in schedulerInput) (any, bool) { return valueOf(in.TimeoutSecs) }, func(j Job) any { return j.TimeoutSecs }},
 }
 
 // describeJobFields renders every field of a job that carries a value, one

@@ -43,14 +43,6 @@ type recordedRequest struct {
 // schedulers built before 863868a did; since then PATCH takes all thirteen
 // fields and answers an unknown one with a 400.
 //
-// It also models the create decoder's refusal of enabled, as the deployed
-// scheduler (4f2b584) has it: the POST struct has no enabled field and decodes
-// strictly, so a request carrying that key is a 400 rather than a disabled job.
-// A tool that starts sending it fails here loudly instead of silently producing
-// a live cron job the caller believes is off. ⚠️ scheduler 271998d, on main but
-// not deployed as of 2026-09-27, adds enabled to POST; once it is live this
-// refusal is stale and the tool should pass enabled through.
-//
 // The read routes serve `job` plus any alsoListed jobs. They exist because the
 // read paths are a third authoring of the same field list and were measured to
 // have their own omissions — extending this fake was cheaper and truer than a
@@ -92,11 +84,6 @@ func fakeScheduler(t *testing.T, job Job, honoured []string, alsoListed ...Job) 
 
 		if err := json.NewDecoder(r.Body).Decode(&seen.Body); err != nil {
 			t.Errorf("fake scheduler could not decode the request body: %s", err)
-		}
-
-		if _, present := seen.Body["enabled"]; present && r.Method == "POST" {
-			http.Error(w, `{"error":"invalid request body","detail":"json: unknown field \"enabled\""}`, 400)
-			return
 		}
 
 		for name, value := range seen.Body {

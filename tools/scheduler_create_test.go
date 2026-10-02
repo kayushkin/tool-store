@@ -16,11 +16,11 @@ import (
 // on screen said so: the old success line named the id, name, schedule, type
 // and enabled flag, and no field beyond those was ever mentioned either way.
 //
-// Every field POST /api/jobs decodes, per scheduler/internal/api/api.go:101-113.
+// Every field POST /api/jobs decodes, per scheduler/internal/api/api.go:126-144.
 var fieldsTheSchedulerStoresOnCreate = []string{
 	"name", "description", "schedule", "command", "type",
 	"agent", "prompt", "model", "orchestrator", "session_id",
-	"workspace_id", "timeout_seconds",
+	"workspace_id", "timeout_seconds", "enabled",
 }
 
 // A blank row carrying only what the server itself supplies: an id, and the
@@ -113,13 +113,10 @@ func TestCreateNamesTheWorkspaceTheServerDidNotStore(t *testing.T) {
 	}
 }
 
-// enabled is the one advertised field that must NOT be forwarded. The
-// scheduler's create struct has no such field and its decoder is strict, so
-// sending the key is a 400; db.go inserts every job enabled, so omitting it
-// changes nothing. What the caller must not get is silence — asking for a
-// disabled job and being told only "Created job 51" leaves them believing a
-// live cron job is off.
-func TestCreateDoesNotSendEnabledAndSaysWhyTheJobIsLive(t *testing.T) {
+// A caller who asks for a disabled job gets one. The scheduler has taken
+// enabled on create since 271998d; before that this tool dropped the key and
+// the caller got a live cron job.
+func TestCreateSendsEnabledFalseAndTheJobIsCreatedOff(t *testing.T) {
 	baseURL, lastRequest := fakeScheduler(t, jobAsCreated(), fieldsTheSchedulerStoresOnCreate)
 
 	report, err := handleCreate(context.Background(), baseURL, "", schedulerInput{
@@ -132,25 +129,23 @@ func TestCreateDoesNotSendEnabledAndSaysWhyTheJobIsLive(t *testing.T) {
 		t.Fatalf("handleCreate returned an error: %s", err)
 	}
 
-	if _, present := lastRequest().Body["enabled"]; present {
-		t.Errorf("create sent enabled, which the scheduler's strict create decoder answers 400: %v", lastRequest().Body)
+	if got, present := lastRequest().Body["enabled"]; !present || got != false {
+		t.Errorf("create did not send enabled:false; body was %v", lastRequest().Body)
 	}
-	if strings.Contains(report, "API returned 400") {
-		t.Fatalf("create was refused, so it sent a key the server does not decode:\n%s", report)
+	if !strings.Contains(report, "Enabled: false") {
+		t.Errorf("the caller asked for a disabled job and the report does not show one:\n%s", report)
 	}
-	if !strings.Contains(report, "Enabled: true") {
-		t.Errorf("the caller asked for a disabled job and the report does not show the job is live:\n%s", report)
-	}
-	if !strings.Contains(report, "enabled was not sent") {
-		t.Errorf("the caller asked for a disabled job and nothing told them it was ignored:\n%s", report)
+	if strings.Contains(report, "NOT stored") {
+		t.Errorf("the server stored every field and the report says otherwise:\n%s", report)
 	}
 }
 
-// A caller who never mentioned enabled should not be lectured about it.
-func TestCreateSaysNothingAboutEnabledWhenTheCallerDidNot(t *testing.T) {
-	baseURL, _ := fakeScheduler(t, jobAsCreated(), fieldsTheSchedulerStoresOnCreate)
+// A caller who never names enabled leaves the choice to the scheduler, which
+// creates the job enabled.
+func TestCreateDoesNotSendEnabledWhenTheCallerDidNotNameIt(t *testing.T) {
+	baseURL, lastRequest := fakeScheduler(t, jobAsCreated(), fieldsTheSchedulerStoresOnCreate)
 
-	report, err := handleCreate(context.Background(), baseURL, "", schedulerInput{
+	_, err := handleCreate(context.Background(), baseURL, "", schedulerInput{
 		Name:     stringPointer("nightly summary"),
 		Schedule: stringPointer("0 8 * * *"),
 		Command:  stringPointer("echo hi"),
@@ -159,8 +154,8 @@ func TestCreateSaysNothingAboutEnabledWhenTheCallerDidNot(t *testing.T) {
 		t.Fatalf("handleCreate returned an error: %s", err)
 	}
 
-	if strings.Contains(report, "enabled was not sent") {
-		t.Errorf("a caller who never named enabled was told about it anyway:\n%s", report)
+	if _, present := lastRequest().Body["enabled"]; present {
+		t.Errorf("create sent enabled though the caller never named it: %v", lastRequest().Body)
 	}
 }
 
