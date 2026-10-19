@@ -179,7 +179,7 @@ if unreviewed:
 if not_seen:
     lines = [f"## {len(not_seen)} claude_code tool(s) no session has reported since {format_time(not_seen_since)}",
              "",
-             "Claude Code may have dropped or renamed these. `never` means no session has reported the tool since tool-store started recording reports. Switch off one that is gone; a seeded one also needs removing from `cmd/tool-store/harness_seeds.go`.",
+             "Claude Code may have dropped or renamed these, or may offer them only where nothing reports. `never` means no session has reported the tool since tool-store started recording reports. Only `-p` sessions report: a pty session reports no tool list (llm-bridge-claudecode `PTY-COVERAGE.md`), and `-p` hides tools an interactive session has — on Claude Code 2.1.283, `AskUserQuestion`, `EnterPlanMode` and `ExitPlanMode` appear only with `--permission-prompt-tool`. Switching a row off denies the tool in every session, pty ones included, so first read the `tools` list in the `init` event of `claude -p --output-format stream-json --verbose` and check whether pty sessions use it. Switch off one that is gone; a seeded one also needs removing from `cmd/tool-store/harness_seeds.go`.",
              ""]
     for tool in not_seen:
         lines.append(f"- `{tool['name']}` (tool id {tool['id']}), last reported {format_time(tool.get('last_seen_at'))}, enabled {str(tool['enabled']).lower()}: `curl -sf -X POST {tool_url(tool)}/disable`")
